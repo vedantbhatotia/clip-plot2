@@ -1,1 +1,1 @@
-from moviepy import VideoFileClip
+from moviepy.editor import VideoFileClip

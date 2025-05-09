@@ -9,7 +9,7 @@ import subprocess # For calling FFmpeg directly
 # Define default output directories. These could be relative to a base processing path.
 DEFAULT_FRAMES_SUBDIR = "extracted_frames"
 DEFAULT_AUDIO_SUBDIR = "extracted_audio"
-FRAME_RATE_STR = "1/2" # For FFmpeg: 1 frame every 2 seconds
+FRAME_RATE_STR = "2/1" # For FFmpeg: 1 frame every 2 seconds
 AUDIO_SAMPLE_RATE = "16000" # Good for Whisper
 AUDIO_CHANNELS = "1" # Mono
 
@@ -36,6 +36,9 @@ def extract_media_content(video_path: str, output_base_path: str):
         return None, None
 
     video_filename_no_ext = os.path.splitext(os.path.basename(video_path))[0]
+
+    DEFAULT_FRAMES_SUBDIR = "extracted_frames/"+video_filename_no_ext
+    DEFAULT_AUDIO_SUBDIR = "extracted_audio/"+video_filename_no_ext
 
     # Define specific output paths for this video's content
     frames_output_dir = os.path.join(output_base_path, DEFAULT_FRAMES_SUBDIR)
@@ -128,4 +131,4 @@ def extract_media_content(video_path: str, output_base_path: str):
 #         print("\nExtraction failed.")
 #         exit(1)
 
-extract_media_content("file_example_MP4_640_3MG.mp4","test_output")
+extract_media_content("rec.mp4","test_output")
