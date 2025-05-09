@@ -4,6 +4,7 @@ import json
 import whisper 
 import logging
 import time
+# from .embedding_service import run_text_embedding_pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -84,6 +85,19 @@ def run_transcription_pipeline(video_id: str, audio_file_path: str, processing_o
         logger.info(f"Transcript saved to: {transcript_output_path}", extra=log_extra)
         
         update_db_transcription_status(video_id, "completed", transcript_path=transcript_output_path)
+
+        # # --- CHAIN TO TEXT EMBEDDING ---
+        # logger.info(f"Triggering text embedding pipeline for video_id: {video_id}", extra=log_extra)
+        # text_embedding_success = run_text_embedding_pipeline(
+        #     video_id=video_id,
+        #     transcript_file_path=transcript_output_path, # Pass the path to the saved transcript
+        #     processing_output_base_path=processing_output_base_path
+        # )
+        # if text_embedding_success:
+        #     logger.info(f"Text embedding pipeline completed successfully for video_id: {video_id}", extra=log_extra)
+        # else:
+        #     logger.error(f"Text embedding pipeline failed for video_id: {video_id}", extra=log_extra)
+            # Potentially update overall video status to indicate embedding failure
 
 
         # queue_text_embedding_task(video_id, result) # Pass the full result dictionary

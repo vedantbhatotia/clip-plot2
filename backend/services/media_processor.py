@@ -5,6 +5,8 @@ import logging
 from .transcription_service import run_transcription_pipeline
 
 
+#EXTRACTION
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - video_id:[%(video_id)s] - %(message)s')
 logger = logging.getLogger(__name__)
 
