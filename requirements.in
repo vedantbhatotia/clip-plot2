@@ -31,6 +31,10 @@ langchain
 langchain-community
 langgraph
 
+
+# git+https://github.com/openai/whisper.git
+openai-whisper
+
 # --- Optional Tools (uncomment if needed) ---
 # audiocraft
 # langsmith

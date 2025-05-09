@@ -3,3 +3,5 @@ venv
 *.mp4
 *.jpg
 *.wav
+*__pycache__
+*/__pycache__
