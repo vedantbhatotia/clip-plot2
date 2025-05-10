@@ -1,0 +1,78 @@
+{
+  "text": " have been rolled back, resources for sustainable development are severely challenged, and many countries really struggle to make ends meet. Navigas...",
+  "segments": [
+    {
+      "id": 0,
+      "seek": 0,
+      "start": 0.0,
+      "end": 7.0,
+      "text": " have been rolled back, resources for sustainable development are severely challenged,",
+      "tokens": [
+        50363,
+        423,
+        587,
+        11686,
+        736,
+        11,
+        4133,
+        329,
+        13347,
+        2478,
+        389,
+        15052,
+        12827,
+        11,
+        50713
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.39870581907384534,
+      "compression_ratio": 1.293103448275862,
+      "no_speech_prob": 0.031780507415533066
+    },
+    {
+      "id": 1,
+      "seek": 0,
+      "start": 7.0,
+      "end": 13.0,
+      "text": " and many countries really struggle to make ends meet.",
+      "tokens": [
+        50713,
+        290,
+        867,
+        2678,
+        1107,
+        6531,
+        284,
+        787,
+        5645,
+        1826,
+        13,
+        51013
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.39870581907384534,
+      "compression_ratio": 1.293103448275862,
+      "no_speech_prob": 0.031780507415533066
+    },
+    {
+      "id": 2,
+      "seek": 0,
+      "start": 13.0,
+      "end": 15.0,
+      "text": " Navigas...",
+      "tokens": [
+        51013,
+        13244,
+        328,
+        292,
+        986,
+        51113
+      ],
+      "temperature": 0.0,
+      "avg_logprob": -0.39870581907384534,
+      "compression_ratio": 1.293103448275862,
+      "no_speech_prob": 0.031780507415533066
+    }
+  ],
+  "language": "en"
+}

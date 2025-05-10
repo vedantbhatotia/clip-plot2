@@ -43,3 +43,10 @@ openai-whisper
 # opentelemetry-exporter-otlp
 # opentelemetry-instrumentation-fastapi
 # opentelemetry-instrumentation-celery
+
+
+# --- Database & ORM (NEW/UPDATED) ---
+sqlalchemy >=1.4,<2.0 # Or a specific version like ~1.4.0 or ~2.0.0 depending on your preference for SQLAlchemy 1.4 vs 2.0 syntax
+asyncpg # For async PostgreSQL operations
+psycopg2-binary # Often needed for sync operations or by tools like Alembic
+alembic # For database migrations
