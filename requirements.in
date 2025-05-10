@@ -50,3 +50,6 @@ sqlalchemy >=1.4,<2.0 # Or a specific version like ~1.4.0 or ~2.0.0 depending on
 asyncpg # For async PostgreSQL operations
 psycopg2-binary # Often needed for sync operations or by tools like Alembic
 alembic # For database migrations
+
+greenlet
+pysqlite-binary

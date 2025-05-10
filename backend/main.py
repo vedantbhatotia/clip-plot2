@@ -1,5 +1,5 @@
 # backend/main.py
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Body # Added Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -8,11 +8,14 @@ import shutil
 import uuid
 from dotenv import load_dotenv
 import logging
+from typing import Optional, List # For type hinting
 
 load_dotenv()
 # --- Import your services ---
 from services.media_processor import process_video_for_extraction # Ensure this becomes async def
 from services import database_service # For database operations
+from services import search_service
+from pydantic import BaseModel, Field
 
 # --- Centralized Logging Configuration ---
 logging.basicConfig(
@@ -27,8 +30,7 @@ app = FastAPI(title="ClipPilot.ai Backend")
 
 # --- CORS Middleware ---
 origins = [
-    "http://localhost:3000", # Your frontend
-    # Add any other origins if needed, or use "*" for development (less secure for prod)
+    "http://localhost:3000",
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -50,6 +52,28 @@ if not os.path.exists(TEMP_VIDEO_DIR):
 else:
     main_logger.info(f"TEMP_VIDEO_DIR found at: {TEMP_VIDEO_DIR}")
 
+class SearchResultItem(BaseModel):
+    id: str
+    video_uuid: Optional[str]
+    segment_text: Optional[str]
+    start_time: Optional[float]
+    end_time: Optional[float]
+    score: Optional[float]
+    score_type: Optional[str]
+
+class SearchQueryRequest(BaseModel):
+    query_text: str = Field(..., min_length=1, description="The text query for semantic search.")
+    video_uuid: Optional[str] = Field(None, description="Optional: UUID of a specific video to search within.")
+    top_k: int = Field(5, gt=0, le=20, description="Number of top results to return.")
+
+class SearchResponse(BaseModel):
+    query: str
+    results: List[SearchResultItem]
+
+# --- Centralized Logging Configuration ---
+# ... (your existing logging config) ...
+main_logger = logging.getLogger(__name__)
+
 
 # --- FastAPI Startup Event ---
 @app.on_event("startup")
@@ -70,7 +94,33 @@ async def ping():
     main_logger.info("Ping endpoint called")
     return {"message": "pong from ClipPilot.ai backend"}
 
+@app.post("/search", summary="Perform semantic search on processed videos", response_model=SearchResponse)
+async def search_videos(query_request: SearchQueryRequest = Body(...)):
+    main_logger.info(f"Search request received: query='{query_request.query_text}', video_uuid='{query_request.video_uuid}', top_k='{query_request.top_k}'")
+    
+    if not search_service.text_embeddings_collection: # Basic check
+        main_logger.error("Search endpoint error: Text embeddings collection not available.")
+        raise HTTPException(status_code=503, detail="Search service is currently unavailable (embeddings store not ready).")
+    if not search_service.get_text_embedding_model(): 
+         main_logger.error("Search endpoint error: Text embedding model not available.")
+         raise HTTPException(status_code=503, detail="Search service is currently unavailable (embedding model not ready).")
 
+
+    try:
+        search_results_data = await search_service.perform_semantic_text_search(
+            query_text=query_request.query_text,
+            video_uuid=query_request.video_uuid,
+            top_k=query_request.top_k
+        )
+        
+        validated_results = [SearchResultItem(**item) for item in search_results_data]
+
+        return SearchResponse(query=query_request.query_text, results=validated_results)
+        
+    except Exception as e:
+        main_logger.exception(f"Unexpected error during search for query: '{query_request.query_text}'")
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during search: {str(e)}")
+    
 @app.post("/upload", summary="Upload a video for processing")
 async def upload_video(
     background_tasks: BackgroundTasks,
