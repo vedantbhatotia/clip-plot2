@@ -8,7 +8,8 @@ import shutil
 import uuid
 from dotenv import load_dotenv
 import logging
-from typing import Optional, List, Union # For type hinting
+from typing import Optional, List, Union, Any # For type hinting
+from services import clip_builder_service
 
 load_dotenv()
 # --- Import your services ---
@@ -52,6 +53,26 @@ if not os.path.exists(TEMP_VIDEO_DIR):
 else:
     main_logger.info(f"TEMP_VIDEO_DIR found at: {TEMP_VIDEO_DIR}")
 
+class HighlightSegmentRequest(BaseModel):
+    start_time: float
+    end_time: float
+    text_content: Optional[str] = None # For subtitles
+
+class GenerateHighlightRequest(BaseModel):
+    video_uuid: str = Field(..., description="UUID of the original video to generate highlights from.")
+    # Option 1: User provides specific segments
+    segments: Optional[List[HighlightSegmentRequest]] = Field(None, description="List of specific segments to include in the highlight.")
+    # Option 2: System derives segments from a search query (more common for automation)
+    search_query_text: Optional[str] = Field(None, description="If segments are not provided, use this query to find segments.")
+    search_type: Optional[str] = Field("text", pattern="^(text|visual)$", description="Type of search if using search_query_text.")
+    search_top_k: Optional[int] = Field(5, description="How many top search results to consider for the clip.")
+    output_filename: Optional[str] = Field(None, description="Optional custom filename for the highlight clip.")
+
+class GenerateHighlightResponse(BaseModel):
+    video_uuid: str
+    message: str
+    highlight_job_id: Optional[str] = None # For future if you make it a true job
+    estimated_highlight_path: Optional[str] = None # Path where it *will be*
 
 class SearchQueryRequest(BaseModel):
     query_text: str = Field(..., min_length=1, description="The text query for semantic search.")
@@ -237,6 +258,111 @@ async def upload_video(
     finally:
         if file: 
             await file.close()
+
+@app.post("/generate_highlight", summary="Generate a highlight clip from a video", response_model=GenerateHighlightResponse)
+async def generate_highlight_endpoint(
+    request_data: GenerateHighlightRequest,
+    background_tasks: BackgroundTasks # To run clip generation in the background
+):
+    main_logger.info(f"video_id: {request_data.video_uuid} - Highlight generation request received.")
+    
+    segments_for_clip: List[Dict[str, Any]] = []
+
+    # --- Determine segments for the clip ---
+    if request_data.segments:
+        # User provided specific segments
+        segments_for_clip = [segment.model_dump() for segment in request_data.segments]
+        main_logger.info(f"video_id: {request_data.video_uuid} - Using {len(segments_for_clip)} user-provided segments for highlight.")
+    elif request_data.search_query_text:
+        # Derive segments from search results
+        main_logger.info(f"video_id: {request_data.video_uuid} - Deriving segments from search query: '{request_data.search_query_text}' (type: {request_data.search_type})")
+        search_results_raw = []
+        if request_data.search_type == "text":
+            if not search_service.text_embeddings_collection or not search_service.get_text_embedding_model(): # no_log=True removed for brevity
+                raise HTTPException(status_code=503, detail="Text search service components not ready for highlight generation.")
+            search_results_raw = await search_service.perform_semantic_text_search(
+                query_text=request_data.search_query_text,
+                video_uuid=request_data.video_uuid,
+                top_k=request_data.search_top_k
+            )
+        elif request_data.search_type == "visual":
+            if not search_service.vision_embeddings_collection or not search_service.get_vision_embedding_model_and_processor(): # no_log_func=True removed
+                raise HTTPException(status_code=503, detail="Vision search service components not ready for highlight generation.")
+            search_results_raw = await search_service.perform_semantic_visual_search(
+                query_text_for_visual=request_data.search_query_text,
+                video_uuid=request_data.video_uuid,
+                top_k=request_data.search_top_k
+            )
+        
+        if not search_results_raw:
+            raise HTTPException(status_code=404, detail="No search results found for the query to generate highlights.")
+
+        # Convert search results to the format expected by clip_builder
+        for res in search_results_raw:
+            if request_data.search_type == "text":
+                segments_for_clip.append({
+                    "start_time": res.get("start_time"),
+                    "end_time": res.get("end_time"),
+                    "text_content": res.get("segment_text") # Pass text for subtitles
+                })
+            elif request_data.search_type == "visual":
+                # For visual results, we might not have 'text_content' unless we fetch it
+                # or decide not to subtitle visual-only segments.
+                # For now, let's assume visual segments might not have subtitles from this flow.
+                # Frame timestamp can be used as a rough start, need to decide segment duration.
+                # This part needs more thought for visual-only segment definition for clips.
+                # Simplification: use frame_timestamp_sec as start, add a fixed duration (e.g., 3s)
+                frame_start = res.get("frame_timestamp_sec")
+                if frame_start is not None:
+                    segments_for_clip.append({
+                        "start_time": frame_start,
+                        "end_time": frame_start + 3.0, # Arbitrary 3s duration for a frame-based hit
+                        "text_content": f"Visual: {res.get('frame_filename')}" # Placeholder text
+                    })
+        main_logger.info(f"video_id: {request_data.video_uuid} - Derived {len(segments_for_clip)} segments from search for highlight.")
+
+    else:
+        raise HTTPException(status_code=400, detail="Either 'segments' or 'search_query_text' must be provided.")
+
+    if not segments_for_clip:
+        raise HTTPException(status_code=400, detail="No valid segments determined for highlight generation.")
+
+    # --- Get video processing base path ---
+    # This path is where the original video's artifacts (and thus highlights) should live.
+    # It was created during the initial upload.
+    video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, request_data.video_uuid)
+    if not os.path.isdir(video_processing_base_path):
+        # This shouldn't happen if the video was processed, but as a safeguard:
+        main_logger.error(f"video_id: {request_data.video_uuid} - Processing base path not found: {video_processing_base_path}")
+        # Attempt to get original video path from DB to reconstruct a base if needed, or fail.
+        # For simplicity here, we'll rely on it existing.
+        raise HTTPException(status_code=404, detail=f"Processing directory for video {request_data.video_uuid} not found. Has it been uploaded and processed?")
+
+    # --- Add clip generation to background tasks ---
+    # Update DB status to HIGHLIGHT_GENERATING before starting task
+    async with database_service.get_db_session() as session:
+        await database_service.update_video_status_and_error(
+            session, request_data.video_uuid, database_service.VideoProcessingStatus.HIGHLIGHT_GENERATING
+        )
+
+    background_tasks.add_task(
+        clip_builder_service.generate_highlight_clip,
+        video_id=request_data.video_uuid,
+        segments_to_include=segments_for_clip,
+        processing_base_path=video_processing_base_path,
+        output_filename=request_data.output_filename
+    )
+    main_logger.info(f"video_id: {request_data.video_uuid} - Highlight generation task added to background.", extra={'video_id': request_data.video_uuid})
+
+    # Construct an estimated path for the response (actual path set by service)
+    highlights_dir = os.path.join(video_processing_base_path, clip_builder_service.HIGHLIGHT_CLIPS_SUBDIR)
+    est_filename = request_data.output_filename or f"highlight_{request_data.video_uuid}_....mp4"
+    
+    return GenerateHighlightResponse(
+        video_uuid=request_data.video_uuid,
+        message="Highlight clip generation has been queued.",
+        estimated_highlight_path=os.path.join(highlights_dir, est_filename) # Provide an idea
+    )
 
 if __name__ == "__main__":
     main_logger.info(f"Starting Uvicorn server. TEMP_VIDEO_DIR is set to: {TEMP_VIDEO_DIR}")

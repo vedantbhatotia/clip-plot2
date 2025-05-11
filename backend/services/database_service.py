@@ -63,6 +63,8 @@ class VideoProcessingStatus(str, enum.Enum):
     VISION_EMBEDDING = "vision_embedding"
     VISION_EMBEDDED = "vision_embedded"
     READY_FOR_SEARCH = "ready_for_search"
+    HIGHLIGHT_GENERATING = "highlight_generating"
+    HIGHLIGHT_GENERATED = "highlight_generated"
     PROCESSING_FAILED = "processing_failed"
     PARTIAL_FAILURE = "partial_failure"
 
@@ -79,6 +81,7 @@ class Video(Base):
     audio_file_path = Column(Text, nullable=True)
     frames_directory_path = Column(Text, nullable=True)
     transcript_file_path = Column(Text, nullable=True)
+    generated_highlight_path = Column(Text, nullable=True)
 
     processing_status = Column(SAEnum(VideoProcessingStatus, name="video_processing_status_enum", create_constraint=True),
                                nullable=False, default=VideoProcessingStatus.UPLOADED)
@@ -189,14 +192,16 @@ async def update_video_asset_paths_record(
     video_uuid: str,
     audio_path: Optional[str] = None,
     frames_dir: Optional[str] = None,
-    transcript_path: Optional[str] = None
+    transcript_path: Optional[str] = None,
+    highlight_clip_path: Optional[str] = None # <--- ADD THIS
 ) -> bool:
     updates_log = []
     if audio_path: updates_log.append(f"audio_path='{audio_path}'")
     if frames_dir: updates_log.append(f"frames_dir='{frames_dir}'")
     if transcript_path: updates_log.append(f"transcript_path='{transcript_path}'")
+    if highlight_clip_path: updates_log.append(f"highlight_clip_path='{highlight_clip_path}'") 
     db_processing_logger.info(f"video_id: {video_uuid} - Updating asset paths: {', '.join(updates_log) if updates_log else 'No paths to update'}")
-    
+
     if not updates_log: # No actual paths provided to update
         return True 
 
@@ -212,6 +217,8 @@ async def update_video_asset_paths_record(
                 video_record.frames_directory_path = frames_dir
             if transcript_path is not None:
                 video_record.transcript_file_path = transcript_path
+            if highlight_clip_path is not None: # <--- ADD THIS
+                video_record.generated_highlight_path = highlight_clip_path
             video_record.updated_at = datetime.utcnow()
             await session.flush()
             await session.refresh(video_record)
