@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional
 from .embedding_service import get_text_embedding_model, text_embeddings_collection 
 from .database_service import get_db_session, get_video_record_by_uuid 
 
+from .embedding_service import get_vision_embedding_model_and_processor, vision_embeddings_collection
+import torch
 logger = logging.getLogger(__name__) 
 
 async def perform_semantic_text_search(
@@ -72,6 +74,75 @@ async def perform_semantic_text_search(
 
     except Exception as e:
         logger.exception(f"video_id: {video_uuid if video_uuid else 'all'} - Error during semantic text search for query '{query_text}'", extra=log_extra)
+        return []
+
+async def perform_semantic_visual_search(
+    query_text_for_visual: str, # Text describing the visual content
+    video_uuid: Optional[str] = None,
+    top_k: int = 5
+) -> List[Dict[str, Any]]:
+    log_extra = {'video_id': video_uuid if video_uuid else "all_videos"}
+    logger.info(f"video_id: {video_uuid if video_uuid else 'all'} - Performing semantic VISUAL search for query: '{query_text_for_visual}', top_k: {top_k}", extra=log_extra)
+
+    if not vision_embeddings_collection:
+        logger.error("ChromaDB vision_embeddings_collection is not available.")
+        return []
+    
+    try:
+        # Get CLIP model and processor
+        # Note: Model loading itself is synchronous and cached in embedding_service
+        vision_model, vision_processor = get_vision_embedding_model_and_processor()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # 1. Encode the text query using CLIP's text encoder
+        # This creates an embedding in the same space as your image embeddings
+        text_inputs = vision_processor(text=[query_text_for_visual], return_tensors="pt", padding=True).to(device)
+        with torch.no_grad():
+            text_embedding = vision_model.get_text_features(**text_inputs)
+        query_embedding = text_embedding.cpu().numpy().flatten().tolist()
+
+
+        where_filter = None
+        if video_uuid:
+            where_filter = {"video_uuid": video_uuid}
+            logger.info(f"Applying filter for video_uuid: {video_uuid} to visual search", extra=log_extra)
+
+        # 2. Query the vision_embeddings_collection
+        results = vision_embeddings_collection.query(
+            query_embeddings=[query_embedding],
+            n_results=top_k,
+            where=where_filter,
+            include=["metadatas", "distances"] # You stored frame_filename, frame_timestamp_sec
+        )
+        logger.info(f"video_id: {video_uuid if video_uuid else 'all'} - ChromaDB visual query returned {len(results.get('ids', [[]])[0]) if results else 0} potential results.", extra=log_extra)
+
+        # 3. Process results
+        processed_results = []
+        if results and results.get('ids') and results['ids'][0]:
+            ids = results['ids'][0]
+            metadatas = results.get('metadatas', [[]])[0]
+            distances = results.get('distances', [[]])[0]
+
+            for i in range(len(ids)):
+                meta = metadatas[i] if metadatas and i < len(metadatas) else {}
+                dist = distances[i] if distances and i < len(distances) else None
+                
+                processed_results.append({
+                    "id": ids[i], # Unique ID of the vision embedding
+                    "video_uuid": meta.get("video_uuid"),
+                    "frame_filename": meta.get("frame_filename"),
+                    "frame_timestamp_sec": meta.get("frame_timestamp_sec"),
+                    "score_type": "distance", # CLIP often uses cosine similarity; distance might be 1-similarity or L2
+                    "score": dist,
+                    # "metadata_debug": meta 
+                })
+            logger.info(f"video_id: {video_uuid if video_uuid else 'all'} - Processed {len(processed_results)} visual search results.", extra=log_extra)
+        else:
+            logger.info(f"video_id: {video_uuid if video_uuid else 'all'} - No visual results found in ChromaDB for the query.", extra=log_extra)
+
+        return processed_results
+    except Exception as e:
+        logger.exception(f"video_id: {video_uuid if video_uuid else 'all'} - Error during semantic visual search for query '{query_text_for_visual}'", extra=log_extra)
         return []
 
 if __name__ == "__main__":

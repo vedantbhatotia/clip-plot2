@@ -8,7 +8,7 @@ import shutil
 import uuid
 from dotenv import load_dotenv
 import logging
-from typing import Optional, List # For type hinting
+from typing import Optional, List, Union # For type hinting
 
 load_dotenv()
 # --- Import your services ---
@@ -52,7 +52,14 @@ if not os.path.exists(TEMP_VIDEO_DIR):
 else:
     main_logger.info(f"TEMP_VIDEO_DIR found at: {TEMP_VIDEO_DIR}")
 
-class SearchResultItem(BaseModel):
+
+class SearchQueryRequest(BaseModel):
+    query_text: str = Field(..., min_length=1, description="The text query for semantic search.")
+    video_uuid: Optional[str] = Field(None, description="Optional: UUID of a specific video to search within.")
+    top_k: int = Field(5, gt=0, le=20, description="Number of top results to return.")
+    search_type: str = Field("text", pattern="^(text|visual)$", description="Type of search: 'text' or 'visual'.") # Added search_type
+
+class TextSearchResultItem(BaseModel):
     id: str
     video_uuid: Optional[str]
     segment_text: Optional[str]
@@ -61,14 +68,18 @@ class SearchResultItem(BaseModel):
     score: Optional[float]
     score_type: Optional[str]
 
-class SearchQueryRequest(BaseModel):
-    query_text: str = Field(..., min_length=1, description="The text query for semantic search.")
-    video_uuid: Optional[str] = Field(None, description="Optional: UUID of a specific video to search within.")
-    top_k: int = Field(5, gt=0, le=20, description="Number of top results to return.")
+class VisionSearchResultItem(BaseModel): # Specific for vision
+    id: str
+    video_uuid: Optional[str]
+    frame_filename: Optional[str]
+    frame_timestamp_sec: Optional[float]
+    score: Optional[float]
+    score_type: Optional[str]
 
 class SearchResponse(BaseModel):
     query: str
-    results: List[SearchResultItem]
+    search_type: str
+    results: List[Union[TextSearchResultItem, VisionSearchResultItem]] 
 
 # --- Centralized Logging Configuration ---
 # ... (your existing logging config) ...
@@ -96,31 +107,41 @@ async def ping():
 
 @app.post("/search", summary="Perform semantic search on processed videos", response_model=SearchResponse)
 async def search_videos(query_request: SearchQueryRequest = Body(...)):
-    main_logger.info(f"Search request received: query='{query_request.query_text}', video_uuid='{query_request.video_uuid}', top_k='{query_request.top_k}'")
+    main_logger.info(f"Search request: query='{query_request.query_text}', type='{query_request.search_type}', video='{query_request.video_uuid}', k='{query_request.top_k}'")
     
-    if not search_service.text_embeddings_collection: # Basic check
-        main_logger.error("Search endpoint error: Text embeddings collection not available.")
-        raise HTTPException(status_code=503, detail="Search service is currently unavailable (embeddings store not ready).")
-    if not search_service.get_text_embedding_model(): 
-         main_logger.error("Search endpoint error: Text embedding model not available.")
-         raise HTTPException(status_code=503, detail="Search service is currently unavailable (embedding model not ready).")
-
-
-    try:
-        search_results_data = await search_service.perform_semantic_text_search(
+    results_data = []
+    if query_request.search_type == "text":
+        if not search_service.text_embeddings_collection or not search_service.get_text_embedding_model():
+            main_logger.error("Search (text): Text embedding service components not ready.")
+            raise HTTPException(status_code=503, detail="Text search service components not ready.")
+        
+        search_results_raw = await search_service.perform_semantic_text_search(
             query_text=query_request.query_text,
             video_uuid=query_request.video_uuid,
             top_k=query_request.top_k
         )
-        
-        validated_results = [SearchResultItem(**item) for item in search_results_data]
+        results_data = [TextSearchResultItem(**item) for item in search_results_raw]
 
-        return SearchResponse(query=query_request.query_text, results=validated_results)
-        
-    except Exception as e:
-        main_logger.exception(f"Unexpected error during search for query: '{query_request.query_text}'")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during search: {str(e)}")
-    
+    elif query_request.search_type == "visual":
+        if not search_service.vision_embeddings_collection or not search_service.get_vision_embedding_model_and_processor(): 
+            main_logger.error("Search (visual): Vision embedding service components not ready.")
+            raise HTTPException(status_code=503, detail="Vision search service components not ready.")
+
+        search_results_raw = await search_service.perform_semantic_visual_search(
+            query_text_for_visual=query_request.query_text, # Using query_text as description for visual
+            video_uuid=query_request.video_uuid,
+            top_k=query_request.top_k
+        )
+        results_data = [VisionSearchResultItem(**item) for item in search_results_raw]
+    else:
+        raise HTTPException(status_code=400, detail="Invalid search_type. Must be 'text' or 'visual'.")
+
+    return SearchResponse(
+        query=query_request.query_text,
+        search_type=query_request.search_type,
+        results=results_data
+    )
+
 @app.post("/upload", summary="Upload a video for processing")
 async def upload_video(
     background_tasks: BackgroundTasks,
