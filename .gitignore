@@ -5,4 +5,3 @@ venv
 *.wav
 *__pycache__
 */__pycache__
-backend/.env
