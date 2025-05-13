@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.future import select
 
 from dotenv import load_dotenv
-# load_dotenv()
+load_dotenv()
 # --- Loggers ---
 module_logger = logging.getLogger(f"app.{__name__}")
 db_processing_logger = logging.getLogger(f"db.processing.{__name__}")
