@@ -12,7 +12,7 @@ celery
 redis
 
 # --- Video & Audio Processing ---
-moviepy
+moviepy==1.0.3
 ffmpeg-python
 openai-whisper
 pyannote.audio
