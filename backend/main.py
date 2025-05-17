@@ -11,7 +11,7 @@ import logging
 from typing import Optional, List, Union, Any # For type hinting
 from services import clip_builder_service
 
-# load_dotenv()
+load_dotenv()
 # --- Import your services ---
 from services.media_processor import process_video_for_extraction # Ensure this becomes async def
 from services import database_service # For database operations
