@@ -1,0 +1,32 @@
+
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend 
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8001" 
+    volumes:
+      - ./backend:/app
+      
+      
+      
+      - clippilot_temp_data:/app/temp_data_in_container 
+      - clippilot_chroma_data:/app/chroma_data_in_container
+    
+
+    env_file:
+      - ./backend/.env 
+    environment:
+      - PYTHONUNBUFFERED=1 
+
+      - TEMP_VIDEO_DIR=/app/temp_data_in_container 
+      - CHROMA_DB_PATH=/app/chroma_data_in_container
+
+volumes:
+  clippilot_temp_data: 
+    driver: local
+  clippilot_chroma_data:
+    driver: local
