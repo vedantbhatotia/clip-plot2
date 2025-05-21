@@ -53,3 +53,4 @@ alembic # For database migrations
 
 greenlet
 pysqlite-binary
+ollama
