@@ -9,6 +9,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough # For more complex chains
 
+
 # Loggers
 module_logger = logging.getLogger(f"app.{__name__}")
 processing_logger = logging.getLogger(f"processing.{__name__}")

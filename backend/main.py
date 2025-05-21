@@ -78,6 +78,12 @@ else:
     main_logger.info(f"TEMP_VIDEO_DIR found at: {TEMP_VIDEO_DIR}")
 
 # --- Pydantic Models ---
+class AgentHighlightRequest(BaseModel):
+    video_uuid: str
+    user_query: str
+    output_filename: Optional[str] = None
+
+
 class HighlightSegmentRequest(BaseModel):
     start_time: float
     end_time: float
@@ -386,6 +392,118 @@ async def generate_highlight_endpoint(request_data: GenerateHighlightRequest, ba
     
     return GenerateHighlightResponse(
         video_uuid=request_data.video_uuid, message="Highlight clip generation has been queued.",
+        estimated_highlight_path=estimated_path
+    )
+
+@app.post("/agent/generate_highlight", summary="Generate a highlight clip using an LLM agent for orchestration", response_model=GenerateHighlightResponse)
+async def agent_generate_highlight_endpoint(
+    request_data: AgentHighlightRequest, 
+    background_tasks: BackgroundTasks
+):
+    log_req_extra = {'video_id': request_data.video_uuid}
+    main_logger.info(f"AGENT highlight request for query: '{request_data.user_query}'", extra=log_req_extra)
+
+    # --- This call would now be to your new agent/orchestration service ---
+    # The orchestrate_clip_generation_with_agent should return the list of segments
+    # For this example, let's assume it returns the segments list directly.
+    
+    # Conceptual call to a more advanced RAG/Agent service that returns segments
+    # segments_from_agent = await rag_service.orchestrate_clip_generation_with_agent(
+    #     user_query=request_data.user_query,
+    #     video_uuid=request_data.video_uuid
+    # )
+    # For now, let's use the simpler RAG refine and then process it,
+    # as the full agent is a larger step.
+    # If your refine_search_results_with_rag was adapted to select segments:
+
+    # Step 1: Basic search to get initial candidates (agent might do this internally)
+    initial_segments_raw = await search_service.perform_semantic_text_search(
+        query_text=request_data.user_query,
+        video_uuid=request_data.video_uuid,
+        top_k=10 # Get more candidates for the agent/LLM to choose from
+    )
+
+    if not initial_segments_raw:
+        raise HTTPException(status_code=404, detail="Agent: Initial search found no segments.")
+
+    # Step 2: Use LLM (via rag_service, but with a different prompt/goal) to select/refine segments for a clip
+    # This is where a dedicated function in rag_service would be needed, e.g., select_segments_for_clip_with_llm
+    # For now, we'll simulate that the RAG summary IS the segments or provides guidance.
+    # THIS IS A SIMPLIFICATION - A real agent would return a structured list of segments.
+    
+    # Let's assume for now the "agent" just means using RAG to get better text and then we process those.
+    # A true agent would be more iterative.
+    # For now, we'll use the existing /generate_highlight logic path for search-driven segments
+    # but one could imagine the `segments_for_clip_raw` being decided by a more intelligent LLM process.
+    
+    # For this example, we'll mimic the current /generate_highlight search path
+    # to show where an agent's output (list of segments) would plug in.
+    
+    main_logger.info(f"Agent: Simulating segment selection using existing search for query: '{request_data.user_query}'", extra=log_req_extra)
+    segments_for_clip_raw = []
+    search_results_from_service = await search_service.perform_semantic_text_search(
+        query_text=request_data.user_query, video_uuid=request_data.video_uuid, top_k=5 # Agent might decide this top_k
+    )
+    if not search_results_from_service:
+        raise HTTPException(status_code=404, detail="Agent-simulated search returned no results.")
+
+    # ... (Same logic as in /generate_highlight to extract start_time, end_time, text_content from search_results_from_service)
+    # ... (This part would be replaced by the direct output of an advanced agent if it returns the structured segment list)
+    for res in search_results_from_service: # Example
+        segments_for_clip_raw.append({
+            "start_time": res.get("start_time"), 
+            "end_time": res.get("end_time"), 
+            "text_content": res.get("segment_text")
+        })
+    # --- End of simulated agent segment selection ---
+
+
+    if not segments_for_clip_raw:
+        raise HTTPException(status_code=400, detail="Agent could not determine any segments for highlight.")
+
+    video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, request_data.video_uuid)
+    original_video_path_for_duration = None
+    video_duration = None
+    async with database_service.get_db_session() as session:
+        video_record = await database_service.get_video_record_by_uuid(session, request_data.video_uuid)
+        if not video_record or not video_record.original_video_file_path:
+            raise HTTPException(status_code=404, detail="Original video not found for agent processing.")
+        original_video_path_for_duration = video_record.original_video_file_path
+    
+    if original_video_path_for_duration:
+        try:
+            def get_duration_sync(path): 
+                with VideoFileClip(path) as clip: return clip.duration
+            video_duration = await asyncio.to_thread(get_duration_sync, original_video_path_for_duration)
+        except Exception as e_dur:
+            main_logger.warning(f"Agent: Could not get video duration: {e_dur}", extra=log_req_extra)
+    
+    # Use default padding/merge values or allow them in AgentHighlightRequest
+    segments_to_pass_to_builder = refine_segments_for_clip(
+        segments_for_clip_raw, 
+        video_duration=video_duration, 
+        video_id=request_data.video_uuid
+    )
+
+    if not segments_to_pass_to_builder:
+        raise HTTPException(status_code=400, detail="Agent: No valid segments after refinement.")
+
+    async with database_service.get_db_session() as session:
+        await database_service.update_video_status_and_error(
+            session, request_data.video_uuid, database_service.VideoProcessingStatus.HIGHLIGHT_GENERATING
+        )
+
+    background_tasks.add_task(
+        clip_builder_service.generate_highlight_clip, video_id=request_data.video_uuid,
+        segments_to_include=segments_to_pass_to_builder, processing_base_path=video_processing_base_path,
+        output_filename=request_data.output_filename
+    )
+    # ... (return GenerateHighlightResponse) ...
+    effective_output_filename = request_data.output_filename or f"highlight_agent_{request_data.video_uuid}_{str(uuid.uuid4())[:8]}.mp4"
+    estimated_path = os.path.join(video_processing_base_path, clip_builder_service.HIGHLIGHT_CLIPS_SUBDIR, effective_output_filename)
+    
+    return GenerateHighlightResponse(
+        video_uuid=request_data.video_uuid, message="Agent-driven highlight generation has been queued.",
         estimated_highlight_path=estimated_path
     )
 
