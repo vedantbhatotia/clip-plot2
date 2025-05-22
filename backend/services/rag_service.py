@@ -3,8 +3,10 @@ import os
 import logging
 import asyncio # For running blocking LangChain calls in threads
 from typing import List, Dict, Any, Optional
+import json
 
 from langchain_community.llms import Ollama
+from langchain_ollama import OllamaLLM 
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough # For more complex chains
@@ -16,7 +18,8 @@ processing_logger = logging.getLogger(f"processing.{__name__}")
 
 # --- RAG Configuration ---
 # These can be moved to .env or a config file
-DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_RAG_MODEL", "llama2:7b") # Or "gemma:7b", etc.
+DEFAULT_OLLAMA_MODEL = os.getenv("OLLAMA_RAG_MODEL", "qwen3:0.6b") # Or "gemma:7b", etc.
+LLM_SELECTOR_MODEL_NAME = os.getenv("OLLAMA_SELECTOR_MODEL", "qwen3:0.6b")
 DEFAULT_OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 RAG_PROMPT_TEMPLATE_STR = """
@@ -34,8 +37,13 @@ Context from video segments:
 Based *only* on the provided context and user query, generate a helpful response:
 """
 
+logger = logging.getLogger(__name__)
+log_system_extra = {'video_id': 'RAG_SERVICE'}
 _llm_instance = None
 _rag_chain_instance = None
+
+_summary_llm_instance: Optional[OllamaLLM] = None
+_rag_summary_chain_instance: Optional[Any] = None
 
 def get_llm_and_rag_chain():
     global _llm_instance, _rag_chain_instance
@@ -66,6 +74,161 @@ def get_llm_and_rag_chain():
             _llm_instance = None
             _rag_chain_instance = None
     return _llm_instance, _rag_chain_instance
+
+
+SEGMENT_SELECTION_PROMPT_TEMPLATE_STR = """
+You are an AI assistant for ClipPilot, tasked with selecting the best video segments for a highlight reel.
+Based on the user's query and the provided candidate video segments (with their text content, start, and end times),
+select up to {max_output_segments} of the most relevant, informative, and engaging segments.
+Avoid redundancy. Ensure the selected segments directly address the user's query.
+
+User Query:
+"{query_str}"
+
+Candidate Video Segments (with original search scores if available):
+{context_segments_str}
+
+Your selection should be a JSON list of segment objects, where each object contains "start_time", "end_time", and "text_content".
+The "text_content" should be the original text from the candidate segment.
+Example output format:
+[
+  {{"start_time": 10.5, "end_time": 15.2, "text_content": "This is the first selected segment text."}},
+  {{"start_time": 22.1, "end_time": 25.5, "text_content": "This is the second selected segment text."}}
+]
+If no segments are suitable or no segments are provided, output an empty JSON list: [].
+
+IMPORTANT: Provide ONLY the JSON list as your final answer, without any preceding text, thoughts, or explanations. Your entire response should be parseable as JSON.
+For example, if you select segments, your entire response should start with '[' and end with ']'.
+If no segments are suitable, your entire response should be '[]'.
+
+Final JSON List of Selected Segments:
+"""
+
+_selector_llm_instance: Optional[OllamaLLM] = None
+_segment_selector_chain_instance: Optional[Any] = None
+
+def get_llm_and_segment_selector_chain():
+    global _selector_llm_instance, _segment_selector_chain_instance
+    if not _segment_selector_chain_instance:
+        try:
+            logger.info(f"Initializing Ollama LLM for SEGMENT SELECTION with model: {LLM_SELECTOR_MODEL_NAME}", extra=log_system_extra)
+            _selector_llm_instance = OllamaLLM(base_url=DEFAULT_OLLAMA_BASE_URL, model=LLM_SELECTOR_MODEL_NAME,
+                                             temperature=0.1) # Lower temp for more deterministic JSON
+            
+            selector_prompt = PromptTemplate.from_template(SEGMENT_SELECTION_PROMPT_TEMPLATE_STR)
+            output_parser = StrOutputParser() # We'll parse JSON manually for now
+
+            _segment_selector_chain_instance = (
+                {
+                    "context_segments_str": lambda x: x["context_segments_str"], 
+                    "query_str": lambda x: x["query_str"],
+                    "max_output_segments": lambda x: x["max_output_segments"]
+                }
+                | selector_prompt 
+                | _selector_llm_instance 
+                | output_parser
+            )
+            logger.info("Segment selector chain initialized successfully.", extra=log_system_extra)
+        except Exception as e:
+            logger.exception("Failed to initialize segment selector chain.", extra=log_system_extra)
+            _selector_llm_instance = None; _segment_selector_chain_instance = None
+    return _selector_llm_instance, _segment_selector_chain_instance
+
+
+async def select_segments_for_highlight_with_llm(
+    query_str: str,
+    candidate_segments: List[Dict[str, Any]], # Raw results from search_service
+    max_output_segments: int = 5, # How many segments the LLM should aim to pick
+    video_id_for_log: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]: # Returns a list of selected segment dicts or None on error
+    log_extra = {'video_id': video_id_for_log or "llm_segment_selection"}
+    logger.info(f"Attempting LLM segment selection for query: '{query_str}' from {len(candidate_segments)} candidates.", extra=log_extra)
+
+    llm, selector_chain = get_llm_and_segment_selector_chain()
+    if not llm or not selector_chain:
+        logger.warning("Segment selector chain/LLM not available.", extra=log_extra)
+        return None # Indicate failure to select
+
+    if not candidate_segments:
+        logger.info("No candidate segments provided for LLM selection.", extra=log_extra)
+        return [] # Return empty list if no candidates
+
+    # Format candidate segments for the prompt
+    context_segments_prompt_str = ""
+    for i, seg in enumerate(candidate_segments):
+        text = seg.get("segment_text", seg.get("text_content", "")) # text_content might be from manual input
+        start = seg.get("start_time")
+        end = seg.get("end_time")
+        score = seg.get("score") # Original search score
+        score_info = f"(score: {score:.2f})" if score is not None else ""
+
+        context_segments_prompt_str += (
+            f"Candidate Segment {i+1} {score_info} (Time: {start:.2f}s - {end:.2f}s):\n"
+            f"\"{text.strip()}\"\n\n"
+        )
+    
+    if not context_segments_prompt_str.strip():
+        logger.info("No usable text content in candidate segments for LLM context.", extra=log_extra)
+        return []
+
+    try:
+        logger.info(f"Invoking segment selector chain. Query: '{query_str}'", extra=log_extra)
+        logger.debug(f"Context for LLM segment selector:\n{context_segments_prompt_str}", extra=log_extra)
+        
+        llm_output_str: str
+        if hasattr(selector_chain, 'ainvoke'):
+            llm_output_str = await selector_chain.ainvoke({
+                "context_segments_str": context_segments_prompt_str, 
+                "query_str": query_str,
+                "max_output_segments": max_output_segments
+            })
+        else:
+            loop = asyncio.get_event_loop()
+            llm_output_str = await loop.run_in_executor(None, selector_chain.invoke, {
+                "context_segments_str": context_segments_prompt_str, 
+                "query_str": query_str,
+                "max_output_segments": max_output_segments
+            })
+        
+        logger.info("Segment selector chain invocation successful.", extra=log_extra)
+        logger.debug(f"LLM raw output for segment selection:\n{llm_output_str}", extra=log_extra)
+
+        # Parse the LLM's JSON output
+        try:
+            # Clean the output: LLMs sometimes add ```json ... ``` or leading/trailing text
+            llm_output_str = llm_output_str.split("</think>")[-1]
+            if llm_output_str.strip().startswith("```json"):
+                llm_output_str = llm_output_str.strip()[7:]
+                if llm_output_str.strip().endswith("```"):
+                    llm_output_str = llm_output_str.strip()[:-3]
+            
+            selected_segments = json.loads(llm_output_str.strip())
+            if isinstance(selected_segments, list):
+                # Validate structure of each segment (basic check)
+                validated_segments = []
+                for s_seg in selected_segments:
+                    if isinstance(s_seg, dict) and \
+                       all(k in s_seg for k in ["start_time", "end_time", "text_content"]) and \
+                       isinstance(s_seg["start_time"], (int, float)) and \
+                       isinstance(s_seg["end_time"], (int, float)) and \
+                       isinstance(s_seg["text_content"], str):
+                        validated_segments.append(s_seg)
+                    else:
+                        logger.warning(f"LLM returned a segment with invalid structure: {s_seg}", extra=log_extra)
+                
+                logger.info(f"LLM selected {len(validated_segments)} segments.", extra=log_extra)
+                return validated_segments
+            else:
+                logger.error(f"LLM output for segment selection was not a JSON list: {selected_segments}", extra=log_extra)
+                return None # Failed to get a valid list
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse LLM output as JSON for segment selection: {llm_output_str}", extra=log_extra)
+            return None # Failed to parse
+
+    except Exception as e:
+        logger.exception(f"Error during LLM segment selection. Query: '{query_str}'", extra=log_extra)
+        return None
+
 
 async def refine_search_results_with_rag(
     query_str: str,
@@ -134,7 +297,6 @@ async def refine_search_results_with_rag(
         processing_logger.exception(f"video_id: {video_id_for_log or 'N/A'} - Error during RAG chain invocation for query: '{query_str}'", extra=log_extra)
         return f"Error while refining search results with RAG: {str(e)}" # Or None
 
-# --- if __name__ == "__main__": for direct testing ---
 if __name__ == "__main__":
     if not logging.getLogger().hasHandlers():
         log_format = '%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s'

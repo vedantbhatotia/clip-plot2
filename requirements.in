@@ -30,6 +30,7 @@ chromadb
 langchain
 langchain-community
 langgraph
+langchain_ollama
 
 
 # git+https://github.com/openai/whisper.git

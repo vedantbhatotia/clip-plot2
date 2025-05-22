@@ -228,10 +228,13 @@ langchain-core==0.3.59
     # via
     #   langchain
     #   langchain-community
+    #   langchain-ollama
     #   langchain-text-splitters
     #   langgraph
     #   langgraph-checkpoint
     #   langgraph-prebuilt
+langchain-ollama==0.3.2
+    # via -r requirements.in
 langchain-text-splitters==0.3.8
     # via langchain
 langgraph==0.4.3
@@ -320,7 +323,9 @@ oauthlib==3.2.2
     #   kubernetes
     #   requests-oauthlib
 ollama==0.4.8
-    # via -r requirements.in
+    # via
+    #   -r requirements.in
+    #   langchain-ollama
 omegaconf==2.3.0
     # via pyannote-audio
 onnxruntime==1.22.0
