@@ -142,6 +142,37 @@ class SearchResponse(BaseModel):
     results: List[Union[TextSearchResultItem, VisionSearchResultItem]]
     rag_summary: Optional[str] = None
 
+def get_transcript_text_for_segment(
+    transcript_data: Dict[str, Any], 
+    segment_start_time: float, 
+    segment_end_time: float,
+    video_id_for_log: str = "N/A"
+) -> Optional[str]:
+    # ... (your existing implementation of this function)
+    log_extra = {'video_id': video_id_for_log}
+    relevant_texts = []
+    whisper_segments = transcript_data.get("segments", [])
+    if not whisper_segments:
+        main_logger.warning(f"No 'segments' key found in transcript data.", extra=log_extra)
+        return None
+    for ws_segment in whisper_segments:
+        ws_start = ws_segment.get("start")
+        ws_end = ws_segment.get("end")
+        ws_text = ws_segment.get("text", "").strip()
+        if ws_start is None or ws_end is None or not ws_text:
+            continue
+        if ws_start < segment_end_time and segment_start_time < ws_end: # Overlap check
+            relevant_texts.append(ws_text)
+    if relevant_texts:
+        full_text = " ".join(relevant_texts).strip()
+        main_logger.debug(f"Found transcript text for {segment_start_time:.2f}-{segment_end_time:.2f}: '{full_text[:100]}...'", extra=log_extra)
+        return full_text
+    else:
+        main_logger.warning(f"No overlapping Whisper segments found for {segment_start_time:.2f}-{segment_end_time:.2f}", extra=log_extra)
+        return None
+
+
+
 # --- FastAPI Startup Event ---
 @app.on_event("startup")
 async def on_startup():
@@ -397,257 +428,231 @@ async def generate_highlight_endpoint(request_data: GenerateHighlightRequest, ba
         estimated_highlight_path=estimated_path
     )
 
-# @app.post("/agent/generate_highlight", summary="Generate a highlight clip using an LLM agent for orchestration", response_model=GenerateHighlightResponse)
+
+# @app.post("/agent/generate_highlight", summary="[LLM-Assisted] Generate highlight clip", response_model=GenerateHighlightResponse)
 # async def agent_generate_highlight_endpoint(
-#     request_data: AgentHighlightRequest, 
+#     request_data: AgentHighlightRequest, # AgentHighlightRequest only needs video_uuid, user_query
 #     background_tasks: BackgroundTasks
 # ):
 #     log_req_extra = {'video_id': request_data.video_uuid}
-#     main_logger.info(f"AGENT highlight request for query: '{request_data.user_query}'", extra=log_req_extra)
+#     main_logger.info(f"LLM-Assisted highlight generation request. Query: '{request_data.user_query}'", extra=log_req_extra)
 
-#     # --- This call would now be to your new agent/orchestration service ---
-#     # The orchestrate_clip_generation_with_agent should return the list of segments
-#     # For this example, let's assume it returns the segments list directly.
+#     # 1. Perform initial broad semantic search to get candidates for the LLM
+#     #    You might want to fetch more candidates than the final clip will have.
+#     search_top_k_candidates = 10 # How many initial segments to feed to the LLM
     
-#     # Conceptual call to a more advanced RAG/Agent service that returns segments
-#     # segments_from_agent = await rag_service.orchestrate_clip_generation_with_agent(
-#     #     user_query=request_data.user_query,
-#     #     video_uuid=request_data.video_uuid
-#     # )
-#     # For now, let's use the simpler RAG refine and then process it,
-#     # as the full agent is a larger step.
-#     # If your refine_search_results_with_rag was adapted to select segments:
-
-#     # Step 1: Basic search to get initial candidates (agent might do this internally)
 #     initial_segments_raw = await search_service.perform_semantic_text_search(
 #         query_text=request_data.user_query,
 #         video_uuid=request_data.video_uuid,
-#         top_k=10 # Get more candidates for the agent/LLM to choose from
+#         top_k=search_top_k_candidates 
 #     )
+#     # Optionally, also perform visual search and combine/interleave candidates if query implies visuals
 
 #     if not initial_segments_raw:
-#         raise HTTPException(status_code=404, detail="Agent: Initial search found no segments.")
+#         main_logger.warning("Initial search for LLM selection found no segments.", extra=log_req_extra)
+#         raise HTTPException(status_code=404, detail="No initial segments found to select from for the highlight.")
 
-#     # Step 2: Use LLM (via rag_service, but with a different prompt/goal) to select/refine segments for a clip
-#     # This is where a dedicated function in rag_service would be needed, e.g., select_segments_for_clip_with_llm
-#     # For now, we'll simulate that the RAG summary IS the segments or provides guidance.
-#     # THIS IS A SIMPLIFICATION - A real agent would return a structured list of segments.
+#     main_logger.info(f"Fetched {len(initial_segments_raw)} candidate segments for LLM selection.", extra=log_req_extra)
+
+#     # 2. Call the LLM-powered segment selection service
+#     llm_selected_segments: Optional[List[Dict[str, Any]]] = None
+#     try:
+#         llm_selected_segments = await rag_service.select_segments_for_highlight_with_llm(
+#             query_str=request_data.user_query,
+#             candidate_segments=initial_segments_raw,
+#             max_output_segments=5, # Ask LLM to pick up to 5 best segments
+#             video_id_for_log=request_data.video_uuid
+#         )
+#     except Exception as e_llm_select:
+#         main_logger.exception("Exception during LLM segment selection call.", extra=log_req_extra)
+#         raise HTTPException(status_code=500, detail=f"LLM segment selection failed: {str(e_llm_select)}")
+
+#     if llm_selected_segments is None:
+#         main_logger.error("LLM segment selection service returned None (error).", extra=log_req_extra)
+#         raise HTTPException(status_code=500, detail="LLM failed to select segments for the highlight clip.")
+#     if not llm_selected_segments:
+#         main_logger.info("LLM selected no suitable segments for the highlight.", extra=log_req_extra)
+#         return GenerateHighlightResponse(
+#             video_uuid=request_data.video_uuid,
+#             message="LLM determined no suitable segments for a highlight based on the query.",
+#             estimated_highlight_path=None 
+#         )
+
+#     main_logger.info(f"LLM selected {len(llm_selected_segments)} segments. Raw from LLM: {json.dumps(llm_selected_segments, indent=2)}", extra=log_req_extra)
     
-#     # Let's assume for now the "agent" just means using RAG to get better text and then we process those.
-#     # A true agent would be more iterative.
-#     # For now, we'll use the existing /generate_highlight logic path for search-driven segments
-#     # but one could imagine the `segments_for_clip_raw` being decided by a more intelligent LLM process.
-    
-#     # For this example, we'll mimic the current /generate_highlight search path
-#     # to show where an agent's output (list of segments) would plug in.
-    
-#     main_logger.info(f"Agent: Simulating segment selection using existing search for query: '{request_data.user_query}'", extra=log_req_extra)
-#     segments_for_clip_raw = []
-#     search_results_from_service = await search_service.perform_semantic_text_search(
-#         query_text=request_data.user_query, video_uuid=request_data.video_uuid, top_k=5 # Agent might decide this top_k
-#     )
-#     if not search_results_from_service:
-#         raise HTTPException(status_code=404, detail="Agent-simulated search returned no results.")
-
-#     # ... (Same logic as in /generate_highlight to extract start_time, end_time, text_content from search_results_from_service)
-#     # ... (This part would be replaced by the direct output of an advanced agent if it returns the structured segment list)
-#     for res in search_results_from_service: # Example
-#         segments_for_clip_raw.append({
-#             "start_time": res.get("start_time"), 
-#             "end_time": res.get("end_time"), 
-#             "text_content": res.get("segment_text")
-#         })
-#     # --- End of simulated agent segment selection ---
-
-
-#     if not segments_for_clip_raw:
-#         raise HTTPException(status_code=400, detail="Agent could not determine any segments for highlight.")
+#     # --- These segments from LLM are now treated like "user-provided" segments ---
+#     # We still need to get video duration and then pass them to segment_processor_service
 
 #     video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, request_data.video_uuid)
-#     original_video_path_for_duration = None
-#     video_duration = None
+#     original_video_path_for_duration: Optional[str] = None
+#     video_duration: Optional[float] = None
+
 #     async with database_service.get_db_session() as session:
 #         video_record = await database_service.get_video_record_by_uuid(session, request_data.video_uuid)
 #         if not video_record or not video_record.original_video_file_path:
-#             raise HTTPException(status_code=404, detail="Original video not found for agent processing.")
+#             main_logger.error("Original video record or path not found in DB for LLM-assisted highlight.", extra=log_req_extra)
+#             raise HTTPException(status_code=404, detail=f"Original video {request_data.video_uuid} not found.")
+#         if not os.path.exists(video_record.original_video_file_path):
+#             main_logger.error(f"Original video file MISSING at {video_record.original_video_file_path}", extra=log_req_extra)
+#             raise HTTPException(status_code=404, detail="Original video file is missing on server.")
 #         original_video_path_for_duration = video_record.original_video_file_path
-    
+
 #     if original_video_path_for_duration:
 #         try:
 #             def get_duration_sync(path): 
 #                 with VideoFileClip(path) as clip: return clip.duration
 #             video_duration = await asyncio.to_thread(get_duration_sync, original_video_path_for_duration)
+#             main_logger.info(f"Fetched video duration: {video_duration:.2f}s for segment refinement.", extra=log_req_extra)
 #         except Exception as e_dur:
-#             main_logger.warning(f"Agent: Could not get video duration: {e_dur}", extra=log_req_extra)
-    
-#     # Use default padding/merge values or allow them in AgentHighlightRequest
+#             main_logger.warning(f"Could not get video duration: {e_dur}. Segment capping may not be accurate.", extra=log_req_extra)
+
+#     # Use default padding/merging values or make them configurable in AgentHighlightRequest
+#     # For now, using some sensible defaults.
 #     segments_to_pass_to_builder = refine_segments_for_clip(
-#         segments_for_clip_raw, 
+#         segments=llm_selected_segments, # Use LLM selected segments
+#         padding_start_sec=0.25, # Minimal padding as LLM already selected context
+#         padding_end_sec=0.25,
+#         max_gap_to_merge_sec=0.1, # Minimal merging
 #         video_duration=video_duration, 
 #         video_id=request_data.video_uuid
 #     )
-
+    
 #     if not segments_to_pass_to_builder:
-#         raise HTTPException(status_code=400, detail="Agent: No valid segments after refinement.")
-
-#     async with database_service.get_db_session() as session:
-#         await database_service.update_video_status_and_error(
-#             session, request_data.video_uuid, database_service.VideoProcessingStatus.HIGHLIGHT_GENERATING
-#         )
-
-#     background_tasks.add_task(
-#         clip_builder_service.generate_highlight_clip, video_id=request_data.video_uuid,
-#         segments_to_include=segments_to_pass_to_builder, processing_base_path=video_processing_base_path,
-#         output_filename=request_data.output_filename
-#     )
-#     # ... (return GenerateHighlightResponse) ...
-#     effective_output_filename = request_data.output_filename or f"highlight_agent_{request_data.video_uuid}_{str(uuid.uuid4())[:8]}.mp4"
-#     estimated_path = os.path.join(video_processing_base_path, clip_builder_service.HIGHLIGHT_CLIPS_SUBDIR, effective_output_filename)
+#         main_logger.error("No valid segments remained after refinement of LLM-selected segments.", extra=log_req_extra)
+#         raise HTTPException(status_code=400, detail="No valid segments after LLM selection and refinement.")
     
-#     return GenerateHighlightResponse(
-#         video_uuid=request_data.video_uuid, message="Agent-driven highlight generation has been queued.",
-#         estimated_highlight_path=estimated_path
-#     )
+#     main_logger.info(f"Using {len(segments_to_pass_to_builder)} LLM-selected & refined segments for clip builder.", extra=log_req_extra)
 
-# @app.post("/agent/generate_highlight", summary="[AGENT] Generate highlight clip via LLM orchestration", response_model=GenerateHighlightResponse)
-# async def agent_generate_highlight_endpoint(
-#     request_data: AgentHighlightRequest, 
-#     background_tasks: BackgroundTasks
-# ):
-#     log_req_extra = {'video_id': request_data.video_uuid}
-#     main_logger.info(f"AGENT-DRIVEN highlight generation request. Query: '{request_data.user_query}'", extra=log_req_extra)
-
-#     # 1. Call the orchestration agent to get the list of segments
-#     # This agent will use tools (search, refine, etc.) and LLM reasoning
-#     # to decide on the final segments.
-#     agent_selected_segments: Optional[List[Dict[str, Any]]] = None
-#     try:
-#         agent_selected_segments = await orchestration_service.run_clip_orchestration_agent(
-#             user_query=request_data.user_query,
-#             video_uuid=request_data.video_uuid
-#         )
-#     except Exception as e_agent:
-#         main_logger.exception("Exception during agent orchestration call.", extra=log_req_extra)
-#         raise HTTPException(status_code=500, detail=f"Agent orchestration failed: {str(e_agent)}")
-
-#     if agent_selected_segments is None: # Agent failed to produce a result
-#         main_logger.error("Agent orchestration service returned None (error or no segments).", extra=log_req_extra)
-#         raise HTTPException(status_code=500, detail="Agent failed to determine segments for the highlight clip.")
-#     if not agent_selected_segments: # Agent returned an empty list
-#         main_logger.info("Agent determined no suitable segments for highlight.", extra=log_req_extra)
-#         # Return a specific message or an empty success, depending on desired behavior
-#         # For now, let's treat "no segments" as a valid outcome that doesn't generate a clip.
-#         return GenerateHighlightResponse(
-#             video_uuid=request_data.video_uuid,
-#             message="Agent determined no suitable segments for a highlight based on the query.",
-#             estimated_highlight_path=None 
-#         )
-#         # Alternatively, raise HTTPException(status_code=404, detail="Agent found no suitable segments.")
-
-
-#     main_logger.info(f"Agent selected {len(agent_selected_segments)} segments for clip builder: {json.dumps(agent_selected_segments, indent=2)}", extra=log_req_extra)
-    
-#     video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, request_data.video_uuid)
 #     if not os.path.isdir(video_processing_base_path):
 #         main_logger.error(f"Processing base path for highlights not found: {video_processing_base_path}.", extra=log_req_extra)
 #         raise HTTPException(status_code=404, detail=f"Processing directory for video {request_data.video_uuid} not found.")
 
-#     # Update DB status to HIGHLIGHT_GENERATING before starting task
 #     async with database_service.get_db_session() as session:
 #         await database_service.update_video_status_and_error(
 #             session, request_data.video_uuid, database_service.VideoProcessingStatus.HIGHLIGHT_GENERATING,
-#             error_msg=f"Agent initiated highlight for query: {request_data.user_query}" # Add context to error_msg field
+#             error_msg=f"LLM-assisted highlight for query: {request_data.user_query}"
 #         )
 
-#     # Add clip generation to background tasks with the agent-selected segments
 #     background_tasks.add_task(
-#         clip_builder_service.generate_highlight_clip, 
-#         video_id=request_data.video_uuid,
-#         segments_to_include=agent_selected_segments, # <<< Segments from the agent
+#         clip_builder_service.generate_highlight_clip, video_id=request_data.video_uuid,
+#         segments_to_include=segments_to_pass_to_builder, 
 #         processing_base_path=video_processing_base_path,
 #         output_filename=request_data.output_filename
 #     )
-#     main_logger.info("Agent-driven highlight generation task added to background.", extra=log_req_extra)
+#     main_logger.info("LLM-assisted highlight generation task added to background.", extra=log_req_extra)
 
-#     effective_output_filename = request_data.output_filename or f"highlight_agent_{request_data.video_uuid}_{str(uuid.uuid4())[:8]}.mp4"
+#     effective_output_filename = request_data.output_filename or f"highlight_llm_{request_data.video_uuid}_{str(uuid.uuid4())[:8]}.mp4"
 #     estimated_path = os.path.join(video_processing_base_path, clip_builder_service.HIGHLIGHT_CLIPS_SUBDIR, effective_output_filename)
     
 #     return GenerateHighlightResponse(
 #         video_uuid=request_data.video_uuid, 
-#         message="Agent-driven highlight generation has been queued.",
+#         message="LLM-assisted highlight generation has been queued.",
 #         estimated_highlight_path=estimated_path
 #     )
 
-
 @app.post("/agent/generate_highlight", summary="[LLM-Assisted] Generate highlight clip", response_model=GenerateHighlightResponse)
 async def agent_generate_highlight_endpoint(
-    request_data: AgentHighlightRequest, # AgentHighlightRequest only needs video_uuid, user_query
+    request_data: AgentHighlightRequest, 
     background_tasks: BackgroundTasks
 ):
     log_req_extra = {'video_id': request_data.video_uuid}
     main_logger.info(f"LLM-Assisted highlight generation request. Query: '{request_data.user_query}'", extra=log_req_extra)
 
-    # 1. Perform initial broad semantic search to get candidates for the LLM
-    #    You might want to fetch more candidates than the final clip will have.
-    search_top_k_candidates = 10 # How many initial segments to feed to the LLM
-    
+    # 1. Perform initial broad semantic search
+    search_top_k_candidates = 10
     initial_segments_raw = await search_service.perform_semantic_text_search(
         query_text=request_data.user_query,
         video_uuid=request_data.video_uuid,
         top_k=search_top_k_candidates 
     )
-    # Optionally, also perform visual search and combine/interleave candidates if query implies visuals
-
     if not initial_segments_raw:
         main_logger.warning("Initial search for LLM selection found no segments.", extra=log_req_extra)
         raise HTTPException(status_code=404, detail="No initial segments found to select from for the highlight.")
-
     main_logger.info(f"Fetched {len(initial_segments_raw)} candidate segments for LLM selection.", extra=log_req_extra)
 
-    # 2. Call the LLM-powered segment selection service
-    llm_selected_segments: Optional[List[Dict[str, Any]]] = None
+    # 2. Call LLM-powered segment selection
+    llm_selected_segments_with_placeholder_text: Optional[List[Dict[str, Any]]] = None
     try:
-        llm_selected_segments = await rag_service.select_segments_for_highlight_with_llm(
+        llm_selected_segments_with_placeholder_text = await rag_service.select_segments_for_highlight_with_llm(
             query_str=request_data.user_query,
-            candidate_segments=initial_segments_raw,
-            max_output_segments=5, # Ask LLM to pick up to 5 best segments
+            candidate_segments=initial_segments_raw, # These have real segment_text
+            max_output_segments=5,
             video_id_for_log=request_data.video_uuid
         )
     except Exception as e_llm_select:
         main_logger.exception("Exception during LLM segment selection call.", extra=log_req_extra)
         raise HTTPException(status_code=500, detail=f"LLM segment selection failed: {str(e_llm_select)}")
 
-    if llm_selected_segments is None:
+    if llm_selected_segments_with_placeholder_text is None:
         main_logger.error("LLM segment selection service returned None (error).", extra=log_req_extra)
-        raise HTTPException(status_code=500, detail="LLM failed to select segments for the highlight clip.")
-    if not llm_selected_segments:
+        raise HTTPException(status_code=500, detail="LLM failed to determine segments for the highlight clip.")
+    if not llm_selected_segments_with_placeholder_text:
         main_logger.info("LLM selected no suitable segments for the highlight.", extra=log_req_extra)
         return GenerateHighlightResponse(
             video_uuid=request_data.video_uuid,
             message="LLM determined no suitable segments for a highlight based on the query.",
             estimated_highlight_path=None 
         )
-
-    main_logger.info(f"LLM selected {len(llm_selected_segments)} segments. Raw from LLM: {json.dumps(llm_selected_segments, indent=2)}", extra=log_req_extra)
+    main_logger.info(f"LLM selected {len(llm_selected_segments_with_placeholder_text)} segments (potentially with placeholder text). Raw from LLM: {json.dumps(llm_selected_segments_with_placeholder_text, indent=2)}", extra=log_req_extra)
     
-    # --- These segments from LLM are now treated like "user-provided" segments ---
-    # We still need to get video duration and then pass them to segment_processor_service
-
-    video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, request_data.video_uuid)
-    original_video_path_for_duration: Optional[str] = None
-    video_duration: Optional[float] = None
+    # --- 3. Fetch Full Transcript Text for LLM-Selected Segments ---
+    segments_for_clip_raw_with_actual_text: List[Dict[str, Any]] = []
+    transcript_file_path_for_video: Optional[str] = None
+    transcript_data_cache: Dict[str, Any] = {}
 
     async with database_service.get_db_session() as session:
         video_record = await database_service.get_video_record_by_uuid(session, request_data.video_uuid)
-        if not video_record or not video_record.original_video_file_path:
-            main_logger.error("Original video record or path not found in DB for LLM-assisted highlight.", extra=log_req_extra)
-            raise HTTPException(status_code=404, detail=f"Original video {request_data.video_uuid} not found.")
-        if not os.path.exists(video_record.original_video_file_path):
-            main_logger.error(f"Original video file MISSING at {video_record.original_video_file_path}", extra=log_req_extra)
-            raise HTTPException(status_code=404, detail="Original video file is missing on server.")
-        original_video_path_for_duration = video_record.original_video_file_path
+        if video_record:
+            transcript_file_path_for_video = video_record.transcript_file_path
+            original_video_path_for_duration = video_record.original_video_file_path # Already fetched
+        else: # Should not happen if video_uuid is valid from request
+            main_logger.error("Video record not found when trying to fetch transcript path.", extra=log_req_extra)
+            raise HTTPException(status_code=404, detail="Video record disappeared.")
 
-    if original_video_path_for_duration:
+    if transcript_file_path_for_video and os.path.exists(transcript_file_path_for_video):
+        try:
+            with open(transcript_file_path_for_video, "r", encoding="utf-8") as f:
+                transcript_data_cache = json.load(f)
+            main_logger.info(f"Loaded transcript data from: {transcript_file_path_for_video} for populating LLM selected segments.", extra=log_req_extra)
+        except Exception as e_load_transcript:
+            main_logger.error(f"Failed to load transcript file {transcript_file_path_for_video}: {e_load_transcript}", extra=log_req_extra)
+    else:
+        main_logger.warning(f"Transcript file path not found or file does not exist: {transcript_file_path_for_video}. Subtitles for LLM-selected segments might be placeholders.", extra=log_req_extra)
+
+    for llm_seg in llm_selected_segments_with_placeholder_text:
+        start_time = llm_seg.get("start_time")
+        end_time = llm_seg.get("end_time")
+        # The text_content from LLM might be a placeholder like "This is the first selected segment text."
+        # We should prioritize fetching the actual transcript.
+        actual_text_content = None
+        if transcript_data_cache and start_time is not None and end_time is not None:
+            actual_text_content = get_transcript_text_for_segment(
+                transcript_data_cache, start_time, end_time, request_data.video_uuid
+            )
+        
+        if not actual_text_content: # Fallback if no transcript or no overlap
+            actual_text_content = llm_seg.get("text_content", "") # Use LLM's text if no better found
+            main_logger.warning(f"Using LLM-provided/placeholder text for segment {start_time}-{end_time} as full transcript fetch failed or yielded nothing.", extra=log_req_extra)
+        
+        if start_time is not None and end_time is not None:
+             segments_for_clip_raw_with_actual_text.append({
+                 "start_time": start_time,
+                 "end_time": end_time,
+                 "text_content": actual_text_content
+             })
+    
+    if not segments_for_clip_raw_with_actual_text:
+        # This should ideally not happen if llm_selected_segments_with_placeholder_text was not empty
+        # and contained valid start/end times.
+        main_logger.error("Failed to populate actual text for any LLM-selected segments.", extra=log_req_extra)
+        raise HTTPException(status_code=500, detail="Error processing LLM-selected segments for subtitles.")
+
+    # --- 4. Get video duration and Refine these LLM-selected (and now text-populated) segments ---
+    video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, request_data.video_uuid)
+    video_duration: Optional[float] = None
+    # original_video_path_for_duration already fetched via video_record earlier
+
+    if original_video_path_for_duration: # This path was fetched when getting transcript_file_path
         try:
             def get_duration_sync(path): 
                 with VideoFileClip(path) as clip: return clip.duration
@@ -656,23 +661,23 @@ async def agent_generate_highlight_endpoint(
         except Exception as e_dur:
             main_logger.warning(f"Could not get video duration: {e_dur}. Segment capping may not be accurate.", extra=log_req_extra)
 
-    # Use default padding/merging values or make them configurable in AgentHighlightRequest
-    # For now, using some sensible defaults.
     segments_to_pass_to_builder = refine_segments_for_clip(
-        segments=llm_selected_segments, # Use LLM selected segments
-        padding_start_sec=0.25, # Minimal padding as LLM already selected context
+        segments=segments_for_clip_raw_with_actual_text, # Use segments with actual text
+        padding_start_sec=0.25, 
         padding_end_sec=0.25,
-        max_gap_to_merge_sec=0.1, # Minimal merging
+        max_gap_to_merge_sec=0.1, 
         video_duration=video_duration, 
         video_id=request_data.video_uuid
     )
     
     if not segments_to_pass_to_builder:
-        main_logger.error("No valid segments remained after refinement of LLM-selected segments.", extra=log_req_extra)
-        raise HTTPException(status_code=400, detail="No valid segments after LLM selection and refinement.")
+        main_logger.error("No valid segments after refinement of LLM-selected segments.", extra=log_req_extra)
+        raise HTTPException(status_code=400, detail="No valid segments after LLM selection and refinement for highlight generation.")
     
     main_logger.info(f"Using {len(segments_to_pass_to_builder)} LLM-selected & refined segments for clip builder.", extra=log_req_extra)
 
+    # ... (rest of the endpoint: check video_processing_base_path, update DB status, add background task, return response) ...
+    # (This part remains the same as your existing /agent/generate_highlight)
     if not os.path.isdir(video_processing_base_path):
         main_logger.error(f"Processing base path for highlights not found: {video_processing_base_path}.", extra=log_req_extra)
         raise HTTPException(status_code=404, detail=f"Processing directory for video {request_data.video_uuid} not found.")
@@ -699,6 +704,7 @@ async def agent_generate_highlight_endpoint(
         message="LLM-assisted highlight generation has been queued.",
         estimated_highlight_path=estimated_path
     )
+
 
 
 if __name__ == "__main__":
