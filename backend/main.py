@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, B
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import re
 import os
 import shutil
 import uuid
@@ -17,6 +18,7 @@ import logging
 from typing import Optional, List, Union, Any, Dict
 import asyncio
 import json
+import math
 
 # --- LOAD DOTENV AT THE VERY BEGINNING ---
 load_dotenv() # <<<--- CORRECTED
@@ -141,6 +143,17 @@ class SearchResponse(BaseModel):
     search_type: str
     results: List[Union[TextSearchResultItem, VisionSearchResultItem]]
     rag_summary: Optional[str] = None
+
+class VideoSummaryResponse(BaseModel):
+    video_uuid: str
+    summary: Optional[str]
+    message: str
+
+class SummaryHighlightResponse(BaseModel):
+    video_uuid: str
+    text_summary: Optional[str]
+    message: str
+    estimated_highlight_path: Optional[str] = None
 
 def get_transcript_text_for_segment(
     transcript_data: Dict[str, Any], 
@@ -706,9 +719,294 @@ async def agent_generate_highlight_endpoint(
     )
 
 
+@app.post("/videos/{video_uuid}/summarize", 
+            summary="Generate a summary of the entire video content",
+            response_model=VideoSummaryResponse)
+async def summarize_video_content(video_uuid: str):
+    log_req_extra = {'video_id': video_uuid}
+    main_logger.info(f"Full video summary request received.", extra=log_req_extra)
+
+    transcript_file_path: Optional[str] = None
+    async with database_service.get_db_session() as session:
+        video_record = await database_service.get_video_record_by_uuid(session, video_uuid)
+        if not video_record:
+            main_logger.warning(f"Video record not found in DB.", extra=log_req_extra)
+            raise HTTPException(status_code=404, detail="Video not found.")
+        if not video_record.transcript_file_path or not os.path.exists(video_record.transcript_file_path):
+            main_logger.warning(f"Transcript file not found for video. Path: {video_record.transcript_file_path}", extra=log_req_extra)
+            raise HTTPException(status_code=404, detail="Transcript not found for this video, cannot summarize.")
+        transcript_file_path = video_record.transcript_file_path
+
+    try:
+        with open(transcript_file_path, "r", encoding="utf-8") as f:
+            transcript_data = json.load(f)
+    except Exception as e:
+        main_logger.exception(f"Failed to load or parse transcript file: {transcript_file_path}", extra=log_req_extra)
+        raise HTTPException(status_code=500, detail="Error reading transcript file.")
+
+    whisper_segments = transcript_data.get("segments", [])
+    if not whisper_segments:
+        main_logger.info(f"No segments found in transcript for video. Cannot summarize.", extra=log_req_extra)
+        return VideoSummaryResponse(
+            video_uuid=video_uuid, 
+            summary=None, 
+            message="No content found in transcript to summarize."
+        )
+
+    all_segments_as_search_results: List[Dict[str, Any]] = []
+    for seg in whisper_segments:
+        all_segments_as_search_results.append({
+            "segment_text": seg.get("text","").strip(), 
+            "text_content": seg.get("text","").strip(), 
+            "start_time": seg.get("start"),
+            "end_time": seg.get("end")
+        })
+
+    if not all_segments_as_search_results:
+        main_logger.info("No processable text segments found after formatting.", extra=log_req_extra)
+        return VideoSummaryResponse(video_uuid=video_uuid, summary=None, message="No text content available to summarize.")
+
+    summary_query = "Provide a concise summary of the following video content."
+    
+    segments_to_summarize = []
+    concatenated_text_for_summary = ""
+    max_chars_for_summary_context = 3000 
+    
+    for seg in whisper_segments:
+        text_to_add = seg.get("text", "").strip()
+        if text_to_add:
+            if len(concatenated_text_for_summary) + len(text_to_add) + 2 < max_chars_for_summary_context:
+                concatenated_text_for_summary += text_to_add + " "
+            else:
+                break 
+    
+    if not concatenated_text_for_summary.strip():
+        main_logger.info("No text content to summarize after attempting concatenation.", extra=log_req_extra)
+        return VideoSummaryResponse(video_uuid=video_uuid, summary=None, message="No text content available for summary.")
+
+    mock_search_result_for_summary = [{
+        "segment_text": concatenated_text_for_summary.strip(),
+        "start_time": whisper_segments[0].get("start") if whisper_segments else 0, 
+        "end_time": whisper_segments[-1].get("end") if whisper_segments else 0, 
+    }]
+
+    main_logger.info(f"Calling RAG service for full video summary with concatenated text (length: {len(concatenated_text_for_summary)}).", extra=log_req_extra)
+    
+    video_summary = await rag_service.refine_search_results_with_rag(
+        query_str=summary_query,
+        search_results=mock_search_result_for_summary,
+        max_context_segments=1, 
+        video_id_for_log=video_uuid
+    )
+
+    if video_summary and "unavailable" not in video_summary.lower() and "error" not in video_summary.lower() :
+        main_logger.info(f"Full video summary generated successfully.", extra=log_req_extra)
+        return VideoSummaryResponse(video_uuid=video_uuid, summary=video_summary, message="Summary generated successfully.")
+    else:
+        main_logger.error(f"Failed to generate full video summary or RAG service reported an issue. LLM Output: {video_summary}", extra=log_req_extra)
+        return VideoSummaryResponse(video_uuid=video_uuid, summary=None, message=video_summary or "Failed to generate summary.")
+
+async def get_full_transcript_text_and_segments(
+    video_uuid: str, 
+    log_req_extra: Dict[str, Any]
+) -> tuple[Optional[str], Optional[List[Dict[str,Any]]], Optional[str]]:
+    """Helper to load full transcript text and structured segments."""
+    transcript_file_path: Optional[str] = None
+    async with database_service.get_db_session() as session:
+        video_record = await database_service.get_video_record_by_uuid(session, video_uuid)
+        if not video_record:
+            main_logger.warning(f"Video record not found in DB.", extra=log_req_extra)
+            return None, None, None # Text, Segments, Original Video Path
+        if not video_record.transcript_file_path or not os.path.exists(video_record.transcript_file_path):
+            main_logger.warning(f"Transcript file not found. Path: {video_record.transcript_file_path}", extra=log_req_extra)
+            return None, None, video_record.original_video_file_path
+        transcript_file_path = video_record.transcript_file_path
+        original_video_path = video_record.original_video_file_path
+
+    try:
+        with open(transcript_file_path, "r", encoding="utf-8") as f:
+            transcript_data = json.load(f)
+        
+        whisper_segments = transcript_data.get("segments", [])
+        full_text = " ".join([seg.get("text", "").strip() for seg in whisper_segments if seg.get("text")])
+        return full_text.strip(), whisper_segments, original_video_path
+    except Exception as e:
+        main_logger.exception(f"Failed to load/parse transcript: {transcript_file_path}", extra=log_req_extra)
+        return None, None, None
+
+
+@app.post("/videos/{video_uuid}/summary_highlight_clip",
+            summary="Generate a text summary and a highlight clip based on the summary",
+            response_model=SummaryHighlightResponse)
+async def generate_summary_and_clip(
+    video_uuid: str,
+    background_tasks: BackgroundTasks,
+    # Optional: Add request body for target_duration_for_clip, max_segments_for_clip
+    target_clip_duration_approx: Optional[int] = Body(60, description="Approximate target duration for the highlight clip in seconds."),
+    max_segments_in_clip: Optional[int] = Body(10, description="Maximum number of distinct segments to try and include.")
+):
+    log_req_extra = {'video_id': video_uuid}
+    main_logger.info(f"Full video summary & highlight clip request received.", extra=log_req_extra)
+
+    full_transcript_text, whisper_segments_for_mapping, original_video_path = await get_full_transcript_text_and_segments(video_uuid, log_req_extra)
+
+    if not full_transcript_text or not whisper_segments_for_mapping: # whisper_segments needed for mapping summary back
+        raise HTTPException(status_code=404, detail="Transcript content not available to generate summary or map segments.")
+
+    max_chars_for_summary_context = 3500 # Adjust based on LLM
+    summary_context_text = full_transcript_text[:max_chars_for_summary_context]
+    
+    mock_search_result_for_summary = [{ # Format for existing RAG function
+        "segment_text": summary_context_text,
+        "start_time": 0, "end_time": 0 # Not crucial for this summary prompt
+    }]
+    summary_query = "Provide a concise summary of the key points in the following video content. Remember your output would be used to make a highlight or summary video, so try retaining information. Try to join multiple short clips, instead of selecting a single long clip."
+    
+    text_summary = await rag_service.refine_search_results_with_rag(
+        query_str=summary_query,
+        search_results=mock_search_result_for_summary,
+        max_context_segments=1, # We are passing one large chunk
+        video_id_for_log=video_uuid
+    )
+
+    if not text_summary or "unavailable" in text_summary.lower() or "error" in text_summary.lower():
+        main_logger.error(f"Failed to generate text summary. LLM Output: {text_summary}", extra=log_req_extra)
+        # Return summary error but still try to make a generic highlight? Or fail here?
+        # For now, let's allow proceeding to clip generation even if summary fails, using a different strategy for segments.
+        # Or, better, raise error if summary is critical for segment selection.
+        raise HTTPException(status_code=500, detail=f"Failed to generate text summary: {text_summary}")
+
+    main_logger.info(f"Text summary generated: {text_summary[:200]}...", extra=log_req_extra)
+
+    # --- 2. Identify Segments Based on the Text Summary (Using Option B: Semantic Search) ---
+    segments_for_clip_raw: List[Dict[str, Any]] = []
+    if text_summary:
+        # Split summary into sentences (simple split, can be improved with NLP library like spaCy/NLTK)
+        summary_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text_summary) if s.strip()]
+        if not summary_sentences and text_summary: # If no sentence splits, use whole summary as one query
+            summary_sentences = [text_summary]
+            
+        main_logger.info(f"Attempting to find segments for {len(summary_sentences)} key points/sentences from summary.", extra=log_req_extra)
+
+        # For each key sentence in the summary, find the best matching segment in the original video
+        # Limit the number of segments to avoid overly long processing for search
+        # And ensure we don't get too many tiny, fragmented results from ChromaDB for each summary sentence
+        
+        all_candidate_segments_from_summary: List[Dict[str, Any]] = []
+        for i, sentence in enumerate(summary_sentences[:max_segments_in_clip]): # Limit queries from summary
+            main_logger.info(f"Searching for video segments related to summary sentence {i+1}: '{sentence[:100]}...'", extra=log_req_extra)
+            # Search for this sentence in the video's text embeddings
+            # We want the top 1-2 most relevant original segments for this summary sentence
+            sentence_search_results = await search_service.perform_semantic_text_search(
+                query_text=sentence,
+                video_uuid=video_uuid,
+                top_k=1 # Get the single best matching original segment for this summary sentence
+            )
+            if sentence_search_results:
+                # Add these to a list of candidates, include original summary sentence for context if needed
+                for res in sentence_search_results:
+                    res["source_summary_sentence"] = sentence # Keep track of which summary part it relates to
+                    all_candidate_segments_from_summary.append(res)
+        
+        # De-duplicate and sort candidates (e.g., if multiple summary sentences point to same video segment)
+        # A simple de-duplication based on start_time can be done.
+        unique_segments_dict: Dict[float, Dict[str, Any]] = {}
+        for seg in all_candidate_segments_from_summary:
+            st = seg.get("start_time")
+            if st is not None:
+                if st not in unique_segments_dict: # Keep first one found for a start time
+                     unique_segments_dict[st] = seg
+                # Optionally, if a new segment for same start time has higher score, replace.
+                # elif seg.get("score",0) > unique_segments_dict[st].get("score",0):
+                #    unique_segments_dict[st] = seg
+
+        segments_for_clip_raw = sorted(list(unique_segments_dict.values()), key=lambda x: x.get("start_time", 0))
+        
+        # Now, ensure the text_content for these segments is the full transcript text
+        # (as done in /agent/generate_highlight)
+        segments_with_full_text: List[Dict[str, Any]] = []
+        if segments_for_clip_raw and whisper_segments_for_mapping: # whisper_segments_for_mapping loaded earlier
+            for seg_from_search in segments_for_clip_raw:
+                s_start = seg_from_search.get("start_time")
+                s_end = seg_from_search.get("end_time")
+                full_seg_text = get_transcript_text_for_segment(
+                    {"segments": whisper_segments_for_mapping}, # Pass in correct format
+                    s_start, 
+                    s_end,
+                    video_uuid
+                )
+                segments_with_full_text.append({
+                    "start_time": s_start,
+                    "end_time": s_end,
+                    "text_content": full_seg_text or seg_from_search.get("segment_text", "") # Fallback
+                })
+            segments_for_clip_raw = segments_with_full_text
+        
+        main_logger.info(f"Identified {len(segments_for_clip_raw)} raw segments based on summary sentences.", extra=log_req_extra)
+
+    if not segments_for_clip_raw:
+        main_logger.warning("No segments identified from summary to generate clip. Clip generation might be empty or fail.", extra=log_req_extra)
+        # Fallback: maybe create a clip of first N seconds of video if summary-based selection fails?
+        # For now, let it proceed, segment_processor might return empty.
+        # Or raise HTTPException here.
+        raise HTTPException(status_code=404, detail="Could not identify relevant video segments based on the generated summary.")
+
+
+    # --- 3. Refine and Build Clip ---
+    video_duration: Optional[float] = None
+    if original_video_path: # Fetched earlier
+        try:
+            def get_duration_sync(path): 
+                with VideoFileClip(path) as clip: return clip.duration
+            video_duration = await asyncio.to_thread(get_duration_sync, original_video_path)
+        except Exception as e_dur:
+            main_logger.warning(f"Could not get video duration for summary clip: {e_dur}", extra=log_req_extra)
+
+    # Apply segment processing (padding, merging, capping)
+    # Use different padding/merging for summary clips if desired, e.g., tighter.
+    segments_to_pass_to_builder = refine_segments_for_clip(
+        segments=segments_for_clip_raw,
+        padding_start_sec=0.2, # Less padding for summary segments
+        padding_end_sec=0.2,
+        max_gap_to_merge_sec=0.5, # Allow some merging
+        video_duration=video_duration,
+        video_id=video_uuid
+    )
+
+    if not segments_to_pass_to_builder:
+        main_logger.error("No valid segments remained after refinement for summary clip.", extra=log_req_extra)
+        raise HTTPException(status_code=400, detail="No valid segments after refinement for summary clip generation.")
+
+    main_logger.info(f"Using {len(segments_to_pass_to_builder)} refined segments for summary clip.", extra=log_req_extra)
+    
+    # --- Queue Clip Generation ---
+    video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, video_uuid)
+    output_clip_filename = f"summary_highlight_{video_uuid}_{str(uuid.uuid4())[:8]}.mp4"
+
+    async with database_service.get_db_session() as session: # New session for this status update
+        await database_service.update_video_status_and_error(
+            session, video_uuid, database_service.VideoProcessingStatus.HIGHLIGHT_GENERATING,
+            error_msg=f"Summary clip generation initiated."
+        )
+
+    background_tasks.add_task(
+        clip_builder_service.generate_highlight_clip,
+        video_id=video_uuid,
+        segments_to_include=segments_to_pass_to_builder,
+        processing_base_path=video_processing_base_path,
+        output_filename=output_clip_filename
+    )
+    main_logger.info("Summary highlight clip generation task added to background.", extra=log_req_extra)
+
+    estimated_path = os.path.join(video_processing_base_path, clip_builder_service.HIGHLIGHT_CLIPS_SUBDIR, output_clip_filename)
+    return SummaryHighlightResponse(
+        video_uuid=video_uuid,
+        text_summary=text_summary,
+        message="Text summary generated and highlight clip generation has been queued.",
+        estimated_highlight_path=estimated_path)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8001")) # Allow configuring port via .env
+    port = int(os.getenv("PORT", "8001")) 
     reload_flag = os.getenv("UVICORN_RELOAD", "true").lower() == "true"
     main_logger.info(f"Starting Uvicorn server on port {port} with reload={reload_flag}. TEMP_VIDEO_DIR: {TEMP_VIDEO_DIR}", extra={'video_id': 'SYSTEM_INIT'})
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=reload_flag)
