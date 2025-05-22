@@ -193,9 +193,9 @@ async def select_segments_for_highlight_with_llm(
         logger.info("Segment selector chain invocation successful.", extra=log_extra)
         logger.debug(f"LLM raw output for segment selection:\n{llm_output_str}", extra=log_extra)
 
-        # Parse the LLM's JSON output
+
         try:
-            # Clean the output: LLMs sometimes add ```json ... ``` or leading/trailing text
+           
             llm_output_str = llm_output_str.split("</think>")[-1]
             if llm_output_str.strip().startswith("```json"):
                 llm_output_str = llm_output_str.strip()[7:]
@@ -204,7 +204,7 @@ async def select_segments_for_highlight_with_llm(
             
             selected_segments = json.loads(llm_output_str.strip())
             if isinstance(selected_segments, list):
-                # Validate structure of each segment (basic check)
+                
                 validated_segments = []
                 for s_seg in selected_segments:
                     if isinstance(s_seg, dict) and \
@@ -220,10 +220,10 @@ async def select_segments_for_highlight_with_llm(
                 return validated_segments
             else:
                 logger.error(f"LLM output for segment selection was not a JSON list: {selected_segments}", extra=log_extra)
-                return None # Failed to get a valid list
+                return None 
         except json.JSONDecodeError:
             logger.error(f"Failed to parse LLM output as JSON for segment selection: {llm_output_str}", extra=log_extra)
-            return None # Failed to parse
+            return None
 
     except Exception as e:
         logger.exception(f"Error during LLM segment selection. Query: '{query_str}'", extra=log_extra)

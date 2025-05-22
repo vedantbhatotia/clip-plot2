@@ -30,7 +30,6 @@ from services import search_service
 from services import clip_builder_service
 from services.segment_processor_service import refine_segments_for_clip
 from services import rag_service
-from services import orchestration_service
 from moviepy.editor import VideoFileClip # For getting video duration
 
 from pydantic import BaseModel, Field
@@ -871,66 +870,56 @@ async def generate_summary_and_clip(
 
     if not text_summary or "unavailable" in text_summary.lower() or "error" in text_summary.lower():
         main_logger.error(f"Failed to generate text summary. LLM Output: {text_summary}", extra=log_req_extra)
-        # Return summary error but still try to make a generic highlight? Or fail here?
-        # For now, let's allow proceeding to clip generation even if summary fails, using a different strategy for segments.
-        # Or, better, raise error if summary is critical for segment selection.
         raise HTTPException(status_code=500, detail=f"Failed to generate text summary: {text_summary}")
 
     main_logger.info(f"Text summary generated: {text_summary[:200]}...", extra=log_req_extra)
 
-    # --- 2. Identify Segments Based on the Text Summary (Using Option B: Semantic Search) ---
+
     segments_for_clip_raw: List[Dict[str, Any]] = []
     if text_summary:
-        # Split summary into sentences (simple split, can be improved with NLP library like spaCy/NLTK)
+
         summary_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text_summary) if s.strip()]
-        if not summary_sentences and text_summary: # If no sentence splits, use whole summary as one query
+        if not summary_sentences and text_summary: 
             summary_sentences = [text_summary]
             
         main_logger.info(f"Attempting to find segments for {len(summary_sentences)} key points/sentences from summary.", extra=log_req_extra)
 
-        # For each key sentence in the summary, find the best matching segment in the original video
-        # Limit the number of segments to avoid overly long processing for search
-        # And ensure we don't get too many tiny, fragmented results from ChromaDB for each summary sentence
-        
+               
         all_candidate_segments_from_summary: List[Dict[str, Any]] = []
         for i, sentence in enumerate(summary_sentences[:max_segments_in_clip]): # Limit queries from summary
             main_logger.info(f"Searching for video segments related to summary sentence {i+1}: '{sentence[:100]}...'", extra=log_req_extra)
-            # Search for this sentence in the video's text embeddings
-            # We want the top 1-2 most relevant original segments for this summary sentence
+            
+            
             sentence_search_results = await search_service.perform_semantic_text_search(
                 query_text=sentence,
                 video_uuid=video_uuid,
-                top_k=1 # Get the single best matching original segment for this summary sentence
+                top_k=1 
             )
             if sentence_search_results:
-                # Add these to a list of candidates, include original summary sentence for context if needed
+                
                 for res in sentence_search_results:
                     res["source_summary_sentence"] = sentence # Keep track of which summary part it relates to
                     all_candidate_segments_from_summary.append(res)
         
-        # De-duplicate and sort candidates (e.g., if multiple summary sentences point to same video segment)
-        # A simple de-duplication based on start_time can be done.
+        
+        
         unique_segments_dict: Dict[float, Dict[str, Any]] = {}
         for seg in all_candidate_segments_from_summary:
             st = seg.get("start_time")
             if st is not None:
-                if st not in unique_segments_dict: # Keep first one found for a start time
+                if st not in unique_segments_dict: 
                      unique_segments_dict[st] = seg
-                # Optionally, if a new segment for same start time has higher score, replace.
-                # elif seg.get("score",0) > unique_segments_dict[st].get("score",0):
-                #    unique_segments_dict[st] = seg
 
         segments_for_clip_raw = sorted(list(unique_segments_dict.values()), key=lambda x: x.get("start_time", 0))
         
-        # Now, ensure the text_content for these segments is the full transcript text
-        # (as done in /agent/generate_highlight)
+
         segments_with_full_text: List[Dict[str, Any]] = []
-        if segments_for_clip_raw and whisper_segments_for_mapping: # whisper_segments_for_mapping loaded earlier
+        if segments_for_clip_raw and whisper_segments_for_mapping:
             for seg_from_search in segments_for_clip_raw:
                 s_start = seg_from_search.get("start_time")
                 s_end = seg_from_search.get("end_time")
                 full_seg_text = get_transcript_text_for_segment(
-                    {"segments": whisper_segments_for_mapping}, # Pass in correct format
+                    {"segments": whisper_segments_for_mapping}, 
                     s_start, 
                     s_end,
                     video_uuid
@@ -946,15 +935,12 @@ async def generate_summary_and_clip(
 
     if not segments_for_clip_raw:
         main_logger.warning("No segments identified from summary to generate clip. Clip generation might be empty or fail.", extra=log_req_extra)
-        # Fallback: maybe create a clip of first N seconds of video if summary-based selection fails?
-        # For now, let it proceed, segment_processor might return empty.
-        # Or raise HTTPException here.
+        
         raise HTTPException(status_code=404, detail="Could not identify relevant video segments based on the generated summary.")
 
 
-    # --- 3. Refine and Build Clip ---
     video_duration: Optional[float] = None
-    if original_video_path: # Fetched earlier
+    if original_video_path: 
         try:
             def get_duration_sync(path): 
                 with VideoFileClip(path) as clip: return clip.duration
@@ -962,13 +948,13 @@ async def generate_summary_and_clip(
         except Exception as e_dur:
             main_logger.warning(f"Could not get video duration for summary clip: {e_dur}", extra=log_req_extra)
 
-    # Apply segment processing (padding, merging, capping)
-    # Use different padding/merging for summary clips if desired, e.g., tighter.
+   
+   
     segments_to_pass_to_builder = refine_segments_for_clip(
         segments=segments_for_clip_raw,
-        padding_start_sec=0.2, # Less padding for summary segments
+        padding_start_sec=0.2, 
         padding_end_sec=0.2,
-        max_gap_to_merge_sec=0.5, # Allow some merging
+        max_gap_to_merge_sec=0.5,
         video_duration=video_duration,
         video_id=video_uuid
     )
@@ -979,11 +965,11 @@ async def generate_summary_and_clip(
 
     main_logger.info(f"Using {len(segments_to_pass_to_builder)} refined segments for summary clip.", extra=log_req_extra)
     
-    # --- Queue Clip Generation ---
+
     video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, video_uuid)
     output_clip_filename = f"summary_highlight_{video_uuid}_{str(uuid.uuid4())[:8]}.mp4"
 
-    async with database_service.get_db_session() as session: # New session for this status update
+    async with database_service.get_db_session() as session:
         await database_service.update_video_status_and_error(
             session, video_uuid, database_service.VideoProcessingStatus.HIGHLIGHT_GENERATING,
             error_msg=f"Summary clip generation initiated."
