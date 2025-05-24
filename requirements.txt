@@ -746,7 +746,7 @@ uvicorn[standard]==0.34.2
     # via
     #   -r requirements.in
     #   chromadb
-uvloop==0.21.0
+# uvloop==0.21.0
     # via uvicorn
 vine==5.1.0
     # via
