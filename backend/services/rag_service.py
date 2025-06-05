@@ -89,11 +89,11 @@ Candidate Video Segments (with original search scores if available):
 {context_segments_str}
 
 Your selection should be a JSON list of segment objects, where each object contains "start_time", "end_time", and "text_content".
-The "text_content" should be the original text from the candidate segment.
-Example output format:
+The "text_content" should be the  text from the candidate segment.
+EXAMPLE output format:
 [
-  {{"start_time": 10.5, "end_time": 15.2, "text_content": "This is the first selected segment text."}},
-  {{"start_time": 22.1, "end_time": 25.5, "text_content": "This is the second selected segment text."}}
+  {{"start_time": 10.5, "end_time": 15.2, "text_content": here add the original text from the candidate segment}},
+  {{"start_time": 22.1, "end_time": 25.5, "text_content": here add the original text from the candidate segment}}
 ]
 If no segments are suitable or no segments are provided, output an empty JSON list: [].
 

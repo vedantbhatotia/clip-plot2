@@ -1,9 +1,4 @@
 
-
-
-
-
-
 # backend/main.py
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Body
 from fastapi.responses import JSONResponse
