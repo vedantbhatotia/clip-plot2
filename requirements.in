@@ -35,6 +35,7 @@ langchain_ollama
 
 # git+https://github.com/openai/whisper.git
 openai-whisper
+supabase
 
 
 # --- Optional Tools (uncomment if needed) ---

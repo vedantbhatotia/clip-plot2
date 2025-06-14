@@ -16,6 +16,8 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     sqlite3\
     ffmpeg \
+    imagemagick\
+    fonts-freefont-ttf \
     git \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
