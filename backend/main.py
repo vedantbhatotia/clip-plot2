@@ -25,6 +25,7 @@ from services import search_service
 from services import clip_builder_service
 from services.segment_processor_service import refine_segments_for_clip
 from services import rag_service
+import services.storage_service as storage_service
 from moviepy.editor import VideoFileClip # For getting video duration
 
 from pydantic import BaseModel, Field
@@ -252,6 +253,178 @@ async def search_videos(query_request: SearchQueryRequest = Body(...)):
                           results=results_data,
                           rag_summary=rag_refined_output)
 
+# @app.post("/upload", summary="Upload a video for processing")
+# async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+#     main_logger.info(f"Upload request received for file: {file.filename or 'N/A'}", extra={'video_id': 'PRE_UUID_UPLOAD'})
+
+#     if not file.content_type or not file.content_type.startswith("video/"):
+#         main_logger.warning(f"Invalid file type: Content-Type='{file.content_type}' for file: {file.filename or 'N/A'}", extra={'video_id': 'INVALID_UPLOAD'})
+#         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a video.")
+    
+#     video_id = str(uuid.uuid4())
+#     log_req_extra = {'video_id': video_id} 
+
+#     main_logger.info(f"Generated for file: {file.filename or 'N/A'}", extra=log_req_extra)
+    
+#     video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, video_id)
+#     try:
+#         os.makedirs(video_processing_base_path, exist_ok=True)
+#         main_logger.info(f"Created processing directory: {video_processing_base_path}", extra=log_req_extra)
+#     except OSError as e:
+#         main_logger.error(f"Failed to create video processing directory {video_processing_base_path}: {e}", extra=log_req_extra)
+#         raise HTTPException(status_code=500, detail="Server error: Could not create processing directory.")
+            
+#     original_filename_sanitized = "uploaded_video.mp4" # Default
+#     if file.filename:
+#         temp_name = "".join(c for c in file.filename if c.isalnum() or c in ['.', '_', '-']).strip()
+#         if temp_name: original_filename_sanitized = temp_name
+            
+#     original_video_file_path = os.path.join(video_processing_base_path, original_filename_sanitized)
+    
+#     supabase_destination_path = f"{video_id}/{original_filename_sanitized}"
+
+#     try:
+#         # 1. Upload to Supabase Storage
+#         uploaded_supabase_key = await storage_service.upload_file_to_supabase(
+#             file_object=file.file,
+#             bucket_name=storage_service.VIDEO_BUCKET_NAME,
+#             destination_path=supabase_destination_path,
+#             content_type=file.content_type
+#         )
+
+#         if not uploaded_supabase_key:
+#             main_logger.error(f"Failed to upload video to Supabase Storage (storage_service returned None).", extra=log_req_extra)
+#             # Attempt to clean up local processing directory if created
+#             if os.path.exists(video_processing_base_path): shutil.rmtree(video_processing_base_path)
+#             raise HTTPException(status_code=500, detail="Error uploading video file to primary storage.")
+        
+#         main_logger.info(f"Video file uploaded to Supabase Storage. Key: {uploaded_supabase_key}", extra=log_req_extra)
+
+#         # 2. Create database record with the Supabase key
+#         async with database_service.get_db_session() as session:
+#             if not database_service.AsyncSessionLocal:
+#                 main_logger.error("Database not configured. Cannot create video record.", extra=log_req_extra)
+#                 if os.path.exists(video_processing_base_path): shutil.rmtree(video_processing_base_path)
+#                 # Consider deleting from Supabase too if upload succeeded but DB failed
+#                 # await storage_service.delete_file_from_supabase(storage_service.VIDEO_BUCKET_NAME, [uploaded_supabase_key])
+#                 raise HTTPException(status_code=503, detail="Database service not available.")
+
+#             video_record = await database_service.add_new_video_record(
+#                 session=session, 
+#                 video_uuid=video_id,
+#                 original_filename_server=original_filename_sanitized,
+#                 original_video_file_path=uploaded_supabase_key # Store the Supabase key
+#             )
+#             if not video_record:
+#                 main_logger.error("Failed to create database record for new video.", extra=log_req_extra)
+#                 if os.path.exists(video_processing_base_path): shutil.rmtree(video_processing_base_path)
+#                 # Consider deleting from Supabase
+#                 # await storage_service.delete_file_from_supabase(storage_service.VIDEO_BUCKET_NAME, [uploaded_supabase_key])
+#                 raise HTTPException(status_code=500, detail="Failed to create video record in database.")
+#             main_logger.info(f"Database record created with DB ID: {video_record.id}, storing Supabase key: {uploaded_supabase_key}", extra=log_req_extra)
+
+#         # 3. Add background task with Supabase key and local temp path for artifacts
+#         background_tasks.add_task(
+#             process_video_for_extraction, 
+#             video_id=video_id,
+#             original_video_supabase_key=uploaded_supabase_key, # Pass the key
+#             video_processing_base_path=video_processing_base_path # Local temp path for this task's run
+#             # local_original_video_download_path and original_video_path are removed as params here.
+#             # process_video_for_extraction will construct its local download path.
+#         )
+#         main_logger.info("Background processing task added successfully.", extra=log_req_extra)
+
+
+#     # uploaded_path_key = await storage_service.upload_file_to_supabase(
+#     #     file_object=file.file, # Pass the SpooledTemporaryFile
+#     #     bucket_name=storage_service.VIDEO_BUCKET_NAME, # e.g., "videos"
+#     #     destination_path=supabase_destination_path,
+#     #     content_type=file.content_type
+#     # )
+
+#     # if not uploaded_path_key:
+#     #     main_logger.error(f"Failed to upload video to Supabase Storage.", extra=log_req_extra)
+#     #     raise HTTPException(status_code=500, detail="Error uploading video file to storage.")
+
+#     # main_logger.info(f"Video file uploaded to Supabase Storage at key: {uploaded_path_key}", extra=log_req_extra)
+
+#     # async with database_service.get_db_session() as session: # Get a new session for this DB operation
+#     #     video_record = await database_service.add_new_video_record(
+#     #         session=session, video_uuid=video_id,
+#     #         original_filename_server=original_filename_sanitized,
+#     #         original_video_file_path=uploaded_path_key # <<< STORE THE RETURNED KEY
+#     #     )
+#     #     if not video_record: # ... handle DB error ...
+
+#     # # Pass supabase_destination_path (the key) to background task
+#     #         background_tasks.add_task(
+#     #             process_video_for_extraction, video_id=video_id,
+#     #             original_video_supabase_key=uploaded_path_key, # Pass the key from Supabase
+#     #             video_processing_base_path=video_processing_base_path # This is still the local temp dir for processing
+#     #         )
+
+#     # ...
+#     # Store supabase_destination_path (the key) in your DB
+#     # instead of the local original_video_file_path
+#     # video_record = await database_service.add_new_video_record(
+#     #     session=session, video_uuid=video_id,
+#     #     original_filename_server=original_filename_sanitized, # Keep original name if useful
+#     #     original_video_file_path=supabase_destination_path # <<< STORE SUPABASE KEY HERE
+#     # )
+#     # # ...
+#     # # Pass supabase_destination_path (the key) to background task
+#     # background_tasks.add_task(
+#     #     process_video_for_extraction, video_id=video_id,
+#     #     original_video_supabase_key=supabase_destination_path, # <<< NEW PARAM NAME
+#     #     video_processing_base_path=video_processing_base_path # This is still the local temp dir for processing
+#     # )
+
+#     # try:
+#     #     async with database_service.get_db_session() as session: # Ensure session is available
+#     #         try:
+#     #             with open(original_video_file_path, "wb") as buffer:
+#     #                 shutil.copyfileobj(file.file, buffer)
+#     #             main_logger.info(f"Video file saved to: {original_video_file_path}", extra=log_req_extra)
+#     #         except Exception as e_save:
+#     #             main_logger.exception("Error saving uploaded file physically.", extra=log_req_extra)
+#     #             raise HTTPException(status_code=500, detail=f"Error saving uploaded file: {str(e_save)}")
+
+#     #         if not database_service.AsyncSessionLocal: # Check if DB is configured
+#     #             main_logger.error("Database not configured. Cannot create video record.", extra=log_req_extra)
+#     #             raise HTTPException(status_code=503, detail="Database service not available.") # 503 Service Unavailable
+
+#     #         video_record = await database_service.add_new_video_record(
+#     #             session=session, video_uuid=video_id,
+#     #             original_filename_server=original_filename_sanitized,
+#     #             original_video_file_path=original_video_file_path
+#     #         )
+#     #         if not video_record:
+#     #             main_logger.error("Failed to create database record for new video (returned None).", extra=log_req_extra)
+#     #             raise HTTPException(status_code=500, detail="Failed to create video record in database.")
+#     #         main_logger.info(f"Database record created with DB ID: {video_record.id}", extra=log_req_extra)
+
+#     #     # process_video_for_extraction should be an async function if it awaits DB calls etc.
+#     #     background_tasks.add_task(
+#     #         process_video_for_extraction, video_id=video_id,
+#     #         original_video_path=original_video_file_path,
+#     #         video_processing_base_path=video_processing_base_path
+#     #     )
+#     #     main_logger.info("Background processing task added.", extra=log_req_extra)
+        
+#     #     return JSONResponse(status_code=202, content={
+#     #         "video_id": video_id, "message": "Video upload accepted. Processing has been queued.",
+#     #         "original_filename_on_server": original_filename_sanitized,
+#     #     })
+#     except HTTPException: raise # Re-raise HTTPExceptions directly
+#     except Exception as e:
+#         main_logger.exception("Unexpected error during upload processing.", extra=log_req_extra)
+#         if os.path.exists(video_processing_base_path): # Cleanup attempt
+#             try: shutil.rmtree(video_processing_base_path)
+#             except Exception as e_rm: main_logger.error(f"Error cleaning directory {video_processing_base_path}: {e_rm}", extra=log_req_extra)
+#         raise HTTPException(status_code=500, detail=f"An unexpected error occurred during upload: {str(e)}")
+#     finally:
+#         if file: await file.close()
+
 @app.post("/upload", summary="Upload a video for processing")
 async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     main_logger.info(f"Upload request received for file: {file.filename or 'N/A'}", extra={'video_id': 'PRE_UUID_UPLOAD'})
@@ -263,12 +436,13 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
     video_id = str(uuid.uuid4())
     log_req_extra = {'video_id': video_id} 
 
-    main_logger.info(f"Generated for file: {file.filename or 'N/A'}", extra=log_req_extra)
+    main_logger.info(f"Generated UUID for file '{file.filename or 'N/A'}': {video_id}", extra=log_req_extra)
     
+    # This is the base path for LOCAL TEMPORARY files generated DURING processing
     video_processing_base_path = os.path.join(TEMP_VIDEO_DIR, video_id)
     try:
         os.makedirs(video_processing_base_path, exist_ok=True)
-        main_logger.info(f"Created processing directory: {video_processing_base_path}", extra=log_req_extra)
+        main_logger.info(f"Created local temporary processing directory: {video_processing_base_path}", extra=log_req_extra)
     except OSError as e:
         main_logger.error(f"Failed to create video processing directory {video_processing_base_path}: {e}", extra=log_req_extra)
         raise HTTPException(status_code=500, detail="Server error: Could not create processing directory.")
@@ -278,53 +452,91 @@ async def upload_video(background_tasks: BackgroundTasks, file: UploadFile = Fil
         temp_name = "".join(c for c in file.filename if c.isalnum() or c in ['.', '_', '-']).strip()
         if temp_name: original_filename_sanitized = temp_name
             
-    original_video_file_path = os.path.join(video_processing_base_path, original_filename_sanitized)
-    
-    try:
-        async with database_service.get_db_session() as session: # Ensure session is available
-            try:
-                with open(original_video_file_path, "wb") as buffer:
-                    shutil.copyfileobj(file.file, buffer)
-                main_logger.info(f"Video file saved to: {original_video_file_path}", extra=log_req_extra)
-            except Exception as e_save:
-                main_logger.exception("Error saving uploaded file physically.", extra=log_req_extra)
-                raise HTTPException(status_code=500, detail=f"Error saving uploaded file: {str(e_save)}")
+    # This is the path/key WITHIN the Supabase Storage bucket
+    supabase_key_in_bucket = f"{video_id}/{original_filename_sanitized}"
 
-            if not database_service.AsyncSessionLocal: # Check if DB is configured
+    uploaded_supabase_key_returned: Optional[str] = None # To store the key if upload is successful
+
+    try:
+        # 1. Upload to Supabase Storage
+        main_logger.info(f"Attempting to upload to Supabase. Bucket: '{storage_service.VIDEO_BUCKET_NAME}', Key in Bucket: '{supabase_key_in_bucket}'", extra=log_req_extra)
+        uploaded_supabase_key_returned = await storage_service.upload_file_to_supabase(
+            file_object=file.file,
+            bucket_name=storage_service.VIDEO_BUCKET_NAME,
+            destination_path_in_bucket=supabase_key_in_bucket, # Pass path within bucket
+            content_type=file.content_type
+        )
+
+        if not uploaded_supabase_key_returned:
+            main_logger.error(f"Failed to upload video to Supabase Storage (storage_service returned None).", extra=log_req_extra)
+            if os.path.exists(video_processing_base_path): shutil.rmtree(video_processing_base_path) # Cleanup local temp dir
+            raise HTTPException(status_code=500, detail="Error uploading video file to primary storage.")
+        
+        main_logger.info(f"Video file uploaded to Supabase Storage. Path in bucket: {uploaded_supabase_key_returned}", extra=log_req_extra)
+
+        # 2. Create database record with the Supabase key (path within bucket)
+        async with database_service.get_db_session() as session:
+            if not database_service.AsyncSessionLocal:
                 main_logger.error("Database not configured. Cannot create video record.", extra=log_req_extra)
-                raise HTTPException(status_code=503, detail="Database service not available.") # 503 Service Unavailable
+                # Attempt to delete already uploaded file from Supabase if DB fails
+                if uploaded_supabase_key_returned:
+                    await storage_service.delete_file_from_supabase(storage_service.VIDEO_BUCKET_NAME, [uploaded_supabase_key_returned])
+                if os.path.exists(video_processing_base_path): shutil.rmtree(video_processing_base_path)
+                raise HTTPException(status_code=503, detail="Database service not available.")
 
             video_record = await database_service.add_new_video_record(
-                session=session, video_uuid=video_id,
-                original_filename_server=original_filename_sanitized,
-                original_video_file_path=original_video_file_path
+                session=session, 
+                video_uuid=video_id,
+                original_filename_server=original_filename_sanitized, # Original filename
+                original_video_file_path=uploaded_supabase_key_returned # Store the Supabase key (path in bucket)
             )
             if not video_record:
-                main_logger.error("Failed to create database record for new video (returned None).", extra=log_req_extra)
+                main_logger.error("Failed to create database record for new video.", extra=log_req_extra)
+                if os.path.exists(video_processing_base_path): shutil.rmtree(video_processing_base_path)
+                if uploaded_supabase_key_returned:
+                    await storage_service.delete_file_from_supabase(storage_service.VIDEO_BUCKET_NAME, [uploaded_supabase_key_returned])
                 raise HTTPException(status_code=500, detail="Failed to create video record in database.")
-            main_logger.info(f"Database record created with DB ID: {video_record.id}", extra=log_req_extra)
+            main_logger.info(f"Database record created with DB ID: {video_record.id}, storing Supabase key: {uploaded_supabase_key_returned}", extra=log_req_extra)
 
-        # process_video_for_extraction should be an async function if it awaits DB calls etc.
+        # 3. Add background task with Supabase key and local temp path for processing artifacts
         background_tasks.add_task(
-            process_video_for_extraction, video_id=video_id,
-            original_video_path=original_video_file_path,
-            video_processing_base_path=video_processing_base_path
+            process_video_for_extraction, 
+            video_id=video_id,
+            original_video_supabase_key=uploaded_supabase_key_returned, # Pass the key in bucket
+            video_processing_base_path=video_processing_base_path # Local temp path for this task's run
         )
-        main_logger.info("Background processing task added.", extra=log_req_extra)
+        main_logger.info("Background processing task added successfully.", extra=log_req_extra)
         
-        return JSONResponse(status_code=202, content={
-            "video_id": video_id, "message": "Video upload accepted. Processing has been queued.",
+        return JSONResponse(status_code=202, content={ # Changed to 202 Accepted
+            "video_id": video_id, 
+            "message": "Video upload accepted and processing queued. Original stored in cloud.",
             "original_filename_on_server": original_filename_sanitized,
+            "storage_key": uploaded_supabase_key_returned
         })
-    except HTTPException: raise # Re-raise HTTPExceptions directly
-    except Exception as e:
-        main_logger.exception("Unexpected error during upload processing.", extra=log_req_extra)
-        if os.path.exists(video_processing_base_path): # Cleanup attempt
+
+    except HTTPException: # Re-raise HTTPExceptions that might come from DB or storage service
+        if os.path.exists(video_processing_base_path) and not uploaded_supabase_key_returned: # Only remove local if Supabase upload didn't happen
             try: shutil.rmtree(video_processing_base_path)
-            except Exception as e_rm: main_logger.error(f"Error cleaning directory {video_processing_base_path}: {e_rm}", extra=log_req_extra)
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred during upload: {str(e)}")
+            except Exception as e_rm: main_logger.error(f"Error cleaning directory {video_processing_base_path} after HTTPException: {e_rm}", extra=log_req_extra)
+        raise
+    except Exception as e: 
+        main_logger.exception("Unexpected error during upload processing.", extra=log_req_extra)
+        if os.path.exists(video_processing_base_path):
+            try: shutil.rmtree(video_processing_base_path)
+            except Exception as e_rm: main_logger.error(f"Error cleaning directory {video_processing_base_path} after general error: {e_rm}", extra=log_req_extra)
+        # If upload to Supabase might have happened but subsequent steps failed, consider deleting from Supabase
+        if uploaded_supabase_key_returned: # Check if it was set
+           # To make this awaitable, the entire except block would need to be async or run this in a thread
+           # For now, this is a best-effort synchronous attempt, or comment out for simplicity
+           main_logger.info(f"Attempting to clean up Supabase file {uploaded_supabase_key_returned} due to error.", extra=log_req_extra)
+           # asyncio.create_task(storage_service.delete_file_from_supabase(storage_service.VIDEO_BUCKET_NAME, [uploaded_supabase_key_returned])) # Fire-and-forget delete
+        raise HTTPException(status_code=500, detail=f"An unexpected server error occurred during upload: {str(e)}")
     finally:
-        if file: await file.close()
+        if file: 
+            try:
+                await file.close()
+            except Exception as e_close:
+                main_logger.warning(f"Error closing upload file stream: {e_close}", extra=log_req_extra)
 
 @app.post("/generate_highlight", summary="Generate a highlight clip from a video", response_model=GenerateHighlightResponse)
 async def generate_highlight_endpoint(request_data: GenerateHighlightRequest, background_tasks: BackgroundTasks):
@@ -374,18 +586,11 @@ async def generate_highlight_endpoint(request_data: GenerateHighlightRequest, ba
         if not video_record or not video_record.original_video_file_path:
             main_logger.error("Original video record or path not found in DB.", extra=log_req_extra)
             raise HTTPException(status_code=404, detail=f"Original video {request_data.video_uuid} not found or path missing.")
-        if not os.path.exists(video_record.original_video_file_path):
-            main_logger.error(f"Original video file MISSING at {video_record.original_video_file_path}", extra=log_req_extra)
-            raise HTTPException(status_code=404, detail="Original video file is missing on server.")
+        # if not os.path.exists(video_record.original_video_file_path):
+        #     main_logger.error(f"Original video file MISSING at {video_record.original_video_file_path}", extra=log_req_extra)
+        #     raise HTTPException(status_code=404, detail="Original video file is missing on server.")
         original_video_path_for_duration = video_record.original_video_file_path
 
-    # try:
-    #     if original_video_path_for_duration:
-    #         with VideoFileClip(original_video_path_for_duration) as temp_clip: # This is blocking
-    #             video_duration = temp_clip.duration
-    #         main_logger.info(f"Fetched video duration: {video_duration:.2f}s for segment refinement.", extra=log_req_extra)
-    # except Exception as e_dur:
-    #     main_logger.warning(f"Could not get video duration using MoviePy: {e_dur}. Segment capping may not be accurate.", extra=log_req_extra)
 
     if original_video_path_for_duration:
         try:

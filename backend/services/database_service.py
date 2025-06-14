@@ -238,10 +238,6 @@ async def get_video_record_by_uuid(session: AsyncSession, video_uuid: str) -> Op
         stmt = select(Video).where(Video.video_uuid == video_uuid)
         result = await session.execute(stmt)
         video_record = result.scalar_one_or_none()
-        # if video_record:
-        #     db_processing_logger.debug(f"video_id: {video_uuid} - Video record found.")
-        # else:
-        #     db_processing_logger.debug(f"video_id: {video_uuid} - Video record not found.")
         return video_record
     except Exception as e:
         db_processing_logger.exception(f"video_id: {video_uuid} - Error fetching video record by UUID.")

@@ -5,11 +5,10 @@ import subprocess
 import logging
 import asyncio # For asyncio.run in __main__ if testing directly
 
-# --- Import Database Service ---
-from . import database_service # Assuming services is a package
+from . import database_service 
+from . import storage_service
 from .database_service import VideoProcessingStatus, get_db_session
 
-# --- Import other service functions (these MUST also become async def) ---
 from .transcription_service import run_transcription_pipeline
 from .embedding_service import run_vision_embedding_pipeline
 
@@ -48,165 +47,315 @@ def parse_frame_rate_to_fps(fr_str: str, video_id_for_log: str = "N/A") -> float
             return 1.0
 
 # --- Make this function ASYNC ---
-async def process_video_for_extraction(video_id: str, original_video_path: str, video_processing_base_path: str):
-    log_extra = {'video_id': video_id}
-    logger.info(f"video_id: {video_id} - Starting full processing chain for: {original_video_path}", extra=log_extra)
+# async def process_video_for_extraction(video_id: str, original_video_supabase_key: str, video_processing_base_path: str):
+#     log_extra = {'video_id': video_id}
+#     logger.info(f"video_id: {video_id} - Starting full processing chain for: {original_video_supabase_key}", extra=log_extra)
     
+#     frames_output_dir = os.path.join(video_processing_base_path, "frames")
+#     audio_output_dir = os.path.join(video_processing_base_path, "audio")
+#     audio_filename = "audio.wav"
+#     audio_file_path = os.path.join(audio_output_dir, audio_filename)
+
+#     media_extraction_successful = False
+#     # These flags will be determined by the return values of the async service calls
+#     transcription_chain_success = False
+#     vision_embedding_chain_success = False
+
+#     # --- Media Extraction Part ---
+#     try:
+#         # --- Download original video from Supabase Storage ---
+#         ensure_dir(video_processing_base_path) # Ensure the main temp processing dir exists
+#         logger.info(f"Downloading original video from Supabase. Key: '{original_video_supabase_key}' to Local Temp: '{local_original_video_download_path}'", extra=log_extra)
+        
+#         downloaded_path = await storage_service.download_file_from_supabase(
+#             bucket_name=storage_service.VIDEO_BUCKET_NAME, 
+#             source_path=original_video_supabase_key,
+#             local_temp_path=local_original_video_download_path
+#         )
+#         if not downloaded_path or not os.path.exists(local_original_video_download_path):
+#             error_msg = "Failed to download original video from Supabase Storage for processing."
+#             logger.error(error_msg, extra=log_extra)
+#             async with get_db_session() as error_session:
+#                 await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
+#             return
+#         logger.info(f"Video successfully downloaded to local temp path: {local_original_video_download_path}", extra=log_extra)
+
+#         async with get_db_session() as session:
+#             try:
+#                 logger.info(f"video_id: {video_id} - Updating status to MEDIA_EXTRACTING.", extra=log_extra)
+#                 await database_service.update_video_status_and_error(
+#                     session, video_id, VideoProcessingStatus.MEDIA_EXTRACTING
+#                 )
+
+#                 if not os.path.exists(original_video_path):
+#                     error_msg = f"Original video file not found at {original_video_path}"
+#                     logger.error(f"video_id: {video_id} - {error_msg}", extra=log_extra)
+#                     await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
+#                     return # Stop here
+
+#                 ensure_dir(frames_output_dir) # ensure_dir might raise OSError
+#                 ensure_dir(audio_output_dir)
+#                 logger.info(f"video_id: {video_id} - Output directories ensured.", extra=log_extra)
+
+#                 # Extract Frames
+#                 frames_command = [
+#                     "ffmpeg", "-i", original_video_path, "-vf", f"fps={FRAME_RATE_STR}",
+#                     "-q:v", "2", os.path.join(frames_output_dir, "frame_%04d.jpg"),
+#                     "-loglevel", "error", "-hide_banner"
+#                 ]
+#                 logger.info(f"video_id: {video_id} - Executing frames command: {' '.join(frames_command)}", extra=log_extra)
+#                 result_frames = subprocess.run(frames_command, check=False, capture_output=True, text=True)
+#                 if result_frames.returncode != 0:
+#                     error_msg = f"Frame extraction failed. FFmpeg stderr: {result_frames.stderr.strip()}"
+#                     logger.error(f"video_id: {video_id} - {error_msg}", extra=log_extra)
+#                     await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
+#                     return
+#                 logger.info(f"video_id: {video_id} - Frame extraction successful.", extra=log_extra)
+
+#                 # Extract Audio
+#                 audio_command = [
+#                     "ffmpeg", "-i", original_video_path, "-vn", "-acodec", "pcm_s16le",
+#                     "-ar", AUDIO_SAMPLE_RATE, "-ac", AUDIO_CHANNELS, audio_file_path,
+#                     "-y", "-loglevel", "error", "-hide_banner"
+#                 ]
+#                 logger.info(f"video_id: {video_id} - Executing audio command: {' '.join(audio_command)}", extra=log_extra)
+#                 result_audio = subprocess.run(audio_command, check=False, capture_output=True, text=True)
+#                 if result_audio.returncode != 0:
+#                     error_msg = f"Audio extraction failed. FFmpeg stderr: {result_audio.stderr.strip()}"
+#                     logger.error(f"video_id: {video_id} - {error_msg}", extra=log_extra)
+#                     await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
+#                     return
+#                 logger.info(f"video_id: {video_id} - Audio extraction successful.", extra=log_extra)
+
+#                 await database_service.update_video_asset_paths_record(
+#                     session, video_id, audio_path=audio_file_path, frames_dir=frames_output_dir
+#                 )
+#                 await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.MEDIA_EXTRACTED)
+#                 media_extraction_successful = True
+#                 logger.info(f"video_id: {video_id} - Media extraction fully completed and DB updated.", extra=log_extra)
+
+#             except OSError as e_os: # Specific exception for makedirs
+#                 logger.exception(f"video_id: {video_id} - OSError during directory creation for media extraction.", extra=log_extra)
+#                 await database_service.update_video_status_and_error(
+#                     session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Media extraction directory error: {str(e_os)}"
+#                 )
+#                 return # Stop processing
+#             except Exception as e_media:
+#                 logger.exception(f"video_id: {video_id} - Unhandled exception during media extraction block.", extra=log_extra)
+#                 await database_service.update_video_status_and_error(
+#                     session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Media extraction critical error: {str(e_media)}"
+#                 )
+#                 return # Stop processing
+
+#         # Subsequent processing happens only if media extraction was successful
+#         # These calls are outside the above 'async with' block, so they will use their own sessions.
+#         if not media_extraction_successful:
+#             logger.error(f"video_id: {video_id} - Media extraction failed, skipping subsequent processing steps.", extra=log_extra)
+#             return
+
+#         # --- Transcription and Text Embedding ---
+#         try:
+#             logger.info(f"video_id: {video_id} - Triggering transcription (and chained text embedding) pipeline.", extra=log_extra)
+#             # run_transcription_pipeline is async and internally updates DB status from TRANSCRIBING -> TRANSCRIBED -> TEXT_EMBEDDING -> TEXT_EMBEDDED or fails
+#             # It should return True if TEXT_EMBEDDED status was successfully set, False otherwise.
+#             transcript_pipeline_returned_success = await run_transcription_pipeline(
+#                 video_id=video_id,
+#                 audio_file_path=audio_file_path,
+#                 processing_output_base_path=video_processing_base_path
+#             )
+#             if transcript_pipeline_returned_success:
+#                 transcription_and_text_embedding_successful = True # Assume success if the function returns True
+#                 logger.info(f"video_id: {video_id} - Transcription and text embedding pipeline reported success.", extra=log_extra)
+#             else:
+#                 logger.error(f"video_id: {video_id} - Transcription and text embedding pipeline reported failure. Check earlier logs for details.", extra=log_extra)
+#                 # The sub-pipeline should have set the DB status to FAILED or PARTIAL_FAILURE
+#         except Exception as e_transcribe_chain:
+#             logger.exception(f"video_id: {video_id} - Top-level exception when calling transcription/text_embedding pipeline.", extra=log_extra)
+#             async with get_db_session() as error_session: # New session for this isolated error update
+#                 await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Transcription/Text Embedding Chain EXCEPTION: {str(e_transcribe_chain)}")
+
+#     # --- Vision Embedding ---
+#         try:
+#             effective_fps = parse_frame_rate_to_fps(FRAME_RATE_STR, video_id_for_log=video_id) # Calculate FPS
+#             logger.info(f"video_id: {video_id} - Triggering vision embedding pipeline with effective_fps: {effective_fps}.", extra=log_extra)
+#             # run_vision_embedding_pipeline is async and internally updates DB status from VISION_EMBEDDING -> VISION_EMBEDDED or fails
+#             # It should return True on success.
+#             vision_pipeline_returned_success = await run_vision_embedding_pipeline(
+#                 video_id=video_id,
+#                 frames_directory_path=frames_output_dir,
+#                 processing_output_base_path=video_processing_base_path,
+#                 effective_fps=effective_fps # Pass calculated FPS
+#             )
+#             if vision_pipeline_returned_success:
+#                 vision_embedding_successful = True # Assume success if the function returns True
+#                 logger.info(f"video_id: {video_id} - Vision embedding pipeline reported success.", extra=log_extra)
+#             else:
+#                 logger.error(f"video_id: {video_id} - Vision embedding pipeline reported failure. Check earlier logs for details.", extra=log_extra)
+#                 # The sub-pipeline should have set the DB status to FAILED or PARTIAL_FAILURE
+#         except Exception as e_vision_chain:
+#             logger.exception(f"video_id: {video_id} - Top-level exception when calling vision_embedding pipeline.", extra=log_extra)
+#             async with get_db_session() as error_session: # New session for this isolated error update
+#                 await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Vision Embedding Chain EXCEPTION: {str(e_vision_chain)}")
+
+#         # --- Final Status Update Based on Outcomes ---
+#         async with get_db_session() as final_session:
+#             # Re-fetch the record to get the most current status set by sub-pipelines
+#             current_video_record = await database_service.get_video_record_by_uuid(final_session, video_id)
+            
+#             if current_video_record and current_video_record.processing_status == VideoProcessingStatus.PROCESSING_FAILED:
+#                 logger.error(f"video_id: {video_id} - Processing was already marked as FAILED. No further status update.", extra=log_extra)
+#             elif transcription_and_text_embedding_successful and vision_embedding_successful:
+#                 await database_service.update_video_status_and_error(final_session, video_id, VideoProcessingStatus.READY_FOR_SEARCH)
+#                 logger.info(f"video_id: {video_id} - All processing and embedding successful. Status set to READY_FOR_SEARCH.", extra=log_extra)
+#             else:
+#                 # If not completely successful and not already marked as failed by a sub-process
+#                 error_summary = "One or more core processing steps (transcription/text_embedding or vision_embedding) failed."
+#                 if not transcription_and_text_embedding_successful:
+#                     error_summary += " Text processing branch failed."
+#                 if not vision_embedding_successful:
+#                     error_summary += " Vision processing branch failed."
+                
+#                 logger.warning(f"video_id: {video_id} - Setting status to PARTIAL_FAILURE. Details: {error_summary}", extra=log_extra)
+#                 await database_service.update_video_status_and_error(
+#                     final_session, video_id, VideoProcessingStatus.PARTIAL_FAILURE, error_summary
+#                 )
+#     finally:
+#         pass    
+    
+#     logger.info(f"video_id: {video_id} - process_video_for_extraction background task finished.", extra=log_extra)
+
+async def process_video_for_extraction(
+    video_id: str, 
+    original_video_supabase_key: str, # This is now the Supabase key
+    video_processing_base_path: str # Local temporary path for this task's artifacts
+):
+    log_extra = {'video_id': video_id}
+    logger.info(f"Starting full processing chain. Supabase Key for original video: {original_video_supabase_key}", extra=log_extra)
+    
+    # Define local paths for intermediate files
     frames_output_dir = os.path.join(video_processing_base_path, "frames")
     audio_output_dir = os.path.join(video_processing_base_path, "audio")
     audio_filename = "audio.wav"
-    audio_file_path = os.path.join(audio_output_dir, audio_filename)
+    local_extracted_audio_path = os.path.join(audio_output_dir, audio_filename) # Local path for extracted audio
+
+    # Define local path for the downloaded original video
+    original_filename_from_key = os.path.basename(original_video_supabase_key) # e.g., "myvideo.mp4"
+    local_original_video_download_path = os.path.join(video_processing_base_path, f"downloaded_{original_filename_from_key}")
 
     media_extraction_successful = False
-    # These flags will be determined by the return values of the async service calls
     transcription_chain_success = False
     vision_embedding_chain_success = False
 
-    # --- Media Extraction Part ---
-    async with get_db_session() as session:
-        try:
-            logger.info(f"video_id: {video_id} - Updating status to MEDIA_EXTRACTING.", extra=log_extra)
-            await database_service.update_video_status_and_error(
-                session, video_id, VideoProcessingStatus.MEDIA_EXTRACTING
-            )
-
-            if not os.path.exists(original_video_path):
-                error_msg = f"Original video file not found at {original_video_path}"
-                logger.error(f"video_id: {video_id} - {error_msg}", extra=log_extra)
-                await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
-                return # Stop here
-
-            ensure_dir(frames_output_dir) # ensure_dir might raise OSError
-            ensure_dir(audio_output_dir)
-            logger.info(f"video_id: {video_id} - Output directories ensured.", extra=log_extra)
-
-            # Extract Frames
-            frames_command = [
-                "ffmpeg", "-i", original_video_path, "-vf", f"fps={FRAME_RATE_STR}",
-                "-q:v", "2", os.path.join(frames_output_dir, "frame_%04d.jpg"),
-                "-loglevel", "error", "-hide_banner"
-            ]
-            logger.info(f"video_id: {video_id} - Executing frames command: {' '.join(frames_command)}", extra=log_extra)
-            result_frames = subprocess.run(frames_command, check=False, capture_output=True, text=True)
-            if result_frames.returncode != 0:
-                error_msg = f"Frame extraction failed. FFmpeg stderr: {result_frames.stderr.strip()}"
-                logger.error(f"video_id: {video_id} - {error_msg}", extra=log_extra)
-                await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
-                return
-            logger.info(f"video_id: {video_id} - Frame extraction successful.", extra=log_extra)
-
-            # Extract Audio
-            audio_command = [
-                "ffmpeg", "-i", original_video_path, "-vn", "-acodec", "pcm_s16le",
-                "-ar", AUDIO_SAMPLE_RATE, "-ac", AUDIO_CHANNELS, audio_file_path,
-                "-y", "-loglevel", "error", "-hide_banner"
-            ]
-            logger.info(f"video_id: {video_id} - Executing audio command: {' '.join(audio_command)}", extra=log_extra)
-            result_audio = subprocess.run(audio_command, check=False, capture_output=True, text=True)
-            if result_audio.returncode != 0:
-                error_msg = f"Audio extraction failed. FFmpeg stderr: {result_audio.stderr.strip()}"
-                logger.error(f"video_id: {video_id} - {error_msg}", extra=log_extra)
-                await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
-                return
-            logger.info(f"video_id: {video_id} - Audio extraction successful.", extra=log_extra)
-
-            await database_service.update_video_asset_paths_record(
-                session, video_id, audio_path=audio_file_path, frames_dir=frames_output_dir
-            )
-            await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.MEDIA_EXTRACTED)
-            media_extraction_successful = True
-            logger.info(f"video_id: {video_id} - Media extraction fully completed and DB updated.", extra=log_extra)
-
-        except OSError as e_os: # Specific exception for makedirs
-            logger.exception(f"video_id: {video_id} - OSError during directory creation for media extraction.", extra=log_extra)
-            await database_service.update_video_status_and_error(
-                 session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Media extraction directory error: {str(e_os)}"
-            )
-            return # Stop processing
-        except Exception as e_media:
-            logger.exception(f"video_id: {video_id} - Unhandled exception during media extraction block.", extra=log_extra)
-            await database_service.update_video_status_and_error(
-                session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Media extraction critical error: {str(e_media)}"
-            )
-            return # Stop processing
-
-    # Subsequent processing happens only if media extraction was successful
-    # These calls are outside the above 'async with' block, so they will use their own sessions.
-    if not media_extraction_successful:
-        logger.error(f"video_id: {video_id} - Media extraction failed, skipping subsequent processing steps.", extra=log_extra)
-        return
-
-    # --- Transcription and Text Embedding ---
     try:
-        logger.info(f"video_id: {video_id} - Triggering transcription (and chained text embedding) pipeline.", extra=log_extra)
-        # run_transcription_pipeline is async and internally updates DB status from TRANSCRIBING -> TRANSCRIBED -> TEXT_EMBEDDING -> TEXT_EMBEDDED or fails
-        # It should return True if TEXT_EMBEDDED status was successfully set, False otherwise.
-        transcript_pipeline_returned_success = await run_transcription_pipeline(
-            video_id=video_id,
-            audio_file_path=audio_file_path,
-            processing_output_base_path=video_processing_base_path
-        )
-        if transcript_pipeline_returned_success:
-            transcription_and_text_embedding_successful = True # Assume success if the function returns True
-            logger.info(f"video_id: {video_id} - Transcription and text embedding pipeline reported success.", extra=log_extra)
-        else:
-            logger.error(f"video_id: {video_id} - Transcription and text embedding pipeline reported failure. Check earlier logs for details.", extra=log_extra)
-            # The sub-pipeline should have set the DB status to FAILED or PARTIAL_FAILURE
-    except Exception as e_transcribe_chain:
-        logger.exception(f"video_id: {video_id} - Top-level exception when calling transcription/text_embedding pipeline.", extra=log_extra)
-        async with get_db_session() as error_session: # New session for this isolated error update
-            await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Transcription/Text Embedding Chain EXCEPTION: {str(e_transcribe_chain)}")
-
-    # --- Vision Embedding ---
-    try:
-        effective_fps = parse_frame_rate_to_fps(FRAME_RATE_STR, video_id_for_log=video_id) # Calculate FPS
-        logger.info(f"video_id: {video_id} - Triggering vision embedding pipeline with effective_fps: {effective_fps}.", extra=log_extra)
-        # run_vision_embedding_pipeline is async and internally updates DB status from VISION_EMBEDDING -> VISION_EMBEDDED or fails
-        # It should return True on success.
-        vision_pipeline_returned_success = await run_vision_embedding_pipeline(
-            video_id=video_id,
-            frames_directory_path=frames_output_dir,
-            processing_output_base_path=video_processing_base_path,
-            effective_fps=effective_fps # Pass calculated FPS
-        )
-        if vision_pipeline_returned_success:
-            vision_embedding_successful = True # Assume success if the function returns True
-            logger.info(f"video_id: {video_id} - Vision embedding pipeline reported success.", extra=log_extra)
-        else:
-            logger.error(f"video_id: {video_id} - Vision embedding pipeline reported failure. Check earlier logs for details.", extra=log_extra)
-            # The sub-pipeline should have set the DB status to FAILED or PARTIAL_FAILURE
-    except Exception as e_vision_chain:
-        logger.exception(f"video_id: {video_id} - Top-level exception when calling vision_embedding pipeline.", extra=log_extra)
-        async with get_db_session() as error_session: # New session for this isolated error update
-            await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Vision Embedding Chain EXCEPTION: {str(e_vision_chain)}")
-
-    # --- Final Status Update Based on Outcomes ---
-    async with get_db_session() as final_session:
-        # Re-fetch the record to get the most current status set by sub-pipelines
-        current_video_record = await database_service.get_video_record_by_uuid(final_session, video_id)
+        # --- Download original video from Supabase Storage ---
+        ensure_dir(video_processing_base_path) # Ensure the main temp processing dir exists
+        logger.info(f"Downloading original video from Supabase. Key: '{original_video_supabase_key}' to Local Temp: '{local_original_video_download_path}'", extra=log_extra)
         
-        if current_video_record and current_video_record.processing_status == VideoProcessingStatus.PROCESSING_FAILED:
-            logger.error(f"video_id: {video_id} - Processing was already marked as FAILED. No further status update.", extra=log_extra)
-        elif transcription_and_text_embedding_successful and vision_embedding_successful:
-            await database_service.update_video_status_and_error(final_session, video_id, VideoProcessingStatus.READY_FOR_SEARCH)
-            logger.info(f"video_id: {video_id} - All processing and embedding successful. Status set to READY_FOR_SEARCH.", extra=log_extra)
-        else:
-            # If not completely successful and not already marked as failed by a sub-process
-            error_summary = "One or more core processing steps (transcription/text_embedding or vision_embedding) failed."
-            if not transcription_and_text_embedding_successful:
-                error_summary += " Text processing branch failed."
-            if not vision_embedding_successful:
-                error_summary += " Vision processing branch failed."
-            
-            logger.warning(f"video_id: {video_id} - Setting status to PARTIAL_FAILURE. Details: {error_summary}", extra=log_extra)
-            await database_service.update_video_status_and_error(
-                final_session, video_id, VideoProcessingStatus.PARTIAL_FAILURE, error_summary
+        downloaded_path = await storage_service.download_file_from_supabase(
+            bucket_name=storage_service.VIDEO_BUCKET_NAME, 
+            source_path=original_video_supabase_key,
+            local_temp_path=local_original_video_download_path
+        )
+        if not downloaded_path or not os.path.exists(local_original_video_download_path):
+            error_msg = "Failed to download original video from Supabase Storage for processing."
+            logger.error(error_msg, extra=log_extra)
+            async with get_db_session() as error_session:
+                await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg)
+            return
+        logger.info(f"Video successfully downloaded to local temp path: {local_original_video_download_path}", extra=log_extra)
+        
+        # --- Media Extraction Part (uses local_original_video_download_path) ---
+        async with get_db_session() as session:
+            try:
+                await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.MEDIA_EXTRACTING)
+                ensure_dir(frames_output_dir); ensure_dir(audio_output_dir)
+
+                # Extract Frames
+                frames_command = ["ffmpeg", "-i", local_original_video_download_path, "-vf", f"fps={FRAME_RATE_STR}", "-q:v", "2", os.path.join(frames_output_dir, "frame_%04d.jpg"), "-loglevel", "error", "-hide_banner"]
+                logger.info(f"Executing frames command: {' '.join(frames_command)}", extra=log_extra)
+                result_frames = subprocess.run(frames_command, check=False, capture_output=True, text=True)
+                if result_frames.returncode != 0:
+                    error_msg = f"Frame extraction failed. FFmpeg stderr: {result_frames.stderr.strip()}"
+                    logger.error(error_msg, extra=log_extra); await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg); return
+                logger.info("Frame extraction successful.", extra=log_extra)
+
+                # Extract Audio
+                audio_command = ["ffmpeg", "-i", local_original_video_download_path, "-vn", "-acodec", "pcm_s16le", "-ar", AUDIO_SAMPLE_RATE, "-ac", AUDIO_CHANNELS, local_extracted_audio_path, "-y", "-loglevel", "error", "-hide_banner"]
+                logger.info(f"Executing audio command: {' '.join(audio_command)}", extra=log_extra)
+                result_audio = subprocess.run(audio_command, check=False, capture_output=True, text=True)
+                if result_audio.returncode != 0:
+                    error_msg = f"Audio extraction failed. FFmpeg stderr: {result_audio.stderr.strip()}"
+                    logger.error(error_msg, extra=log_extra); await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, error_msg); return
+                logger.info(f"Audio extraction successful. Saved to local: {local_extracted_audio_path}", extra=log_extra)
+
+                # Store LOCAL paths for these intermediate files in DB.
+                # These files are temporary to this processing run.
+                await database_service.update_video_asset_paths_record(session, video_id, audio_path=local_extracted_audio_path, frames_dir=frames_output_dir)
+                await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.MEDIA_EXTRACTED)
+                media_extraction_successful = True
+            except OSError as e_os:
+                await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Media extraction directory error: {str(e_os)}")
+                return
+            except Exception as e_media:
+                await database_service.update_video_status_and_error(session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Media extraction critical error: {str(e_media)}")
+                return
+
+        if not media_extraction_successful: return
+
+        # --- Transcription and Text Embedding (uses local_extracted_audio_path) ---
+        try:
+            transcript_pipeline_output_path = await run_transcription_pipeline(
+                video_id=video_id, audio_file_path=local_extracted_audio_path, 
+                processing_output_base_path=video_processing_base_path
             )
+            if transcript_pipeline_output_path: # This is the local path to transcript.json
+                transcription_and_text_embedding_successful = True
+                logger.info(f"Transcription & text embedding pipeline success. Transcript at: {transcript_pipeline_output_path}", extra=log_extra)
+            else: logger.error("Transcription & text embedding pipeline reported failure.", extra=log_extra)
+        except Exception as e_transcribe_chain:
+            logger.exception("Top-level exception: transcription/text_embedding pipeline.", extra=log_extra)
+            async with get_db_session() as error_session: await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Transcription Chain EXCEPTION: {str(e_transcribe_chain)}")
+
+        # --- Vision Embedding (uses local frames_output_dir) ---
+        try:
+            effective_fps = parse_frame_rate_to_fps(FRAME_RATE_STR, video_id_for_log=video_id)
+            vision_pipeline_returned_success = await run_vision_embedding_pipeline(
+                video_id=video_id, frames_directory_path=frames_output_dir, 
+                processing_output_base_path=video_processing_base_path,
+                effective_fps=effective_fps
+            )
+            if vision_pipeline_returned_success: vision_embedding_successful = True
+            else: logger.error("Vision embedding pipeline reported failure.", extra=log_extra)
+        except Exception as e_vision_chain:
+            logger.exception("Top-level exception: vision_embedding pipeline.", extra=log_extra)
+            async with get_db_session() as error_session: await database_service.update_video_status_and_error(error_session, video_id, VideoProcessingStatus.PROCESSING_FAILED, f"Vision Embedding Chain EXCEPTION: {str(e_vision_chain)}")
+
+        # --- Final Status Update ---
+        async with get_db_session() as final_session:
+            current_video_record = await database_service.get_video_record_by_uuid(final_session, video_id)
+            if current_video_record and current_video_record.processing_status == VideoProcessingStatus.PROCESSING_FAILED:
+                logger.error("Processing already marked FAILED by a sub-step.", extra=log_extra)
+            elif transcription_and_text_embedding_successful and vision_embedding_successful:
+                await database_service.update_video_status_and_error(final_session, video_id, VideoProcessingStatus.READY_FOR_SEARCH)
+                logger.info("All processing successful. Status: READY_FOR_SEARCH.", extra=log_extra)
+            else:
+                # ... (existing partial failure logic) ...
+                error_summary = "One or more core processing steps failed."
+                if not transcription_and_text_embedding_successful: error_summary += " Text processing branch failed."
+                if not vision_embedding_successful: error_summary += " Vision processing branch failed."
+                logger.warning(f"Setting status to PARTIAL_FAILURE. Details: {error_summary}", extra=log_extra)
+                await database_service.update_video_status_and_error(final_session, video_id, VideoProcessingStatus.PARTIAL_FAILURE, error_summary)
     
-    logger.info(f"video_id: {video_id} - process_video_for_extraction background task finished.", extra=log_extra)
+    finally:
+        # Clean up the initially downloaded original video file from local temp storage
+        if os.path.exists(local_original_video_download_path):
+            try:
+                os.remove(local_original_video_download_path)
+                logger.info(f"Cleaned up local temp original video: {local_original_video_download_path}", extra=log_extra)
+            except OSError as e_remove:
+                logger.error(f"Failed to remove temp original video {local_original_video_download_path}: {e_remove}", extra=log_extra)
+    logger.info(f"process_video_for_extraction background task finished.", extra=log_extra)
 
-
-# --- if __name__ == "__main__": block for direct testing ---
 if __name__ == "__main__":
     if not logging.getLogger().hasHandlers():
         log_format = '%(asctime)s - %(levelname)s - %(name)s - %(module)s.%(funcName)s:%(lineno)d - %(message)s'
