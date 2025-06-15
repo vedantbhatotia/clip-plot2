@@ -1,8 +1,11 @@
 
 # backend/main.py
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Body
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime # Add if not already imported
+from sqlalchemy.future import select
 import uvicorn
 import re
 import os
@@ -14,6 +17,15 @@ from typing import Optional, List, Union, Any, Dict
 import asyncio
 import json
 import math
+
+from pydantic import BaseModel, Field # Ensure Field is imported
+from typing import Optional
+class VideoStatusResponse(BaseModel):
+    video_uuid: str
+    processing_status: str # String value of the VideoProcessingStatus enum
+    error_message: Optional[str] = None
+    highlight_clip_path: Optional[str] = None # Path or key in Supabase Storage
+    download_url: Optional[str] = None # Constructed URL for client to download/view
 
 # --- LOAD DOTENV AT THE VERY BEGINNING ---
 load_dotenv() # <<<--- CORRECTED
@@ -149,6 +161,17 @@ class SummaryHighlightResponse(BaseModel):
     text_summary: Optional[str]
     message: str
     estimated_highlight_path: Optional[str] = None
+
+
+class VideoListItemResponse(BaseModel): # New Pydantic model for the response
+    video_uuid: str
+    original_filename_server: Optional[str] = None
+    processing_status: str # Will be the string value of your enum
+    created_at: datetime
+    updated_at: Optional[datetime] = None # Good to have
+    highlight_clip_path: Optional[str] = None
+
+
 
 def get_transcript_text_for_segment(
     transcript_data: Dict[str, Any], 
@@ -1032,6 +1055,166 @@ async def get_full_transcript_text_and_segments(
     except Exception as e:
         main_logger.exception(f"Failed to load/parse transcript: {transcript_file_path}", extra=log_req_extra)
         return None, None, None
+
+
+# In main.py, with your other @app.get or @app.post routes
+
+# Ensure these are imported at the top of main.py
+# from services import database_service
+# from fastapi import HTTPException
+# import os # For os.path.join
+# from .services import clip_builder_service # To get HIGHLIGHT_CLIPS_SUBDIR for URL construction
+
+@app.get("/videos/{video_uuid}/status", 
+         response_model=VideoStatusResponse, 
+         summary="Get processing status and highlight info of a specific video")
+async def get_video_status_endpoint(video_uuid: str): # Renamed from get_video_status for clarity
+    log_req_extra = {'video_id': video_uuid} # Use the actual video_uuid for logging context
+    main_logger.info(f"Status request received.", extra=log_req_extra)
+    
+    async with database_service.get_db_session() as session:
+        video_record = await database_service.get_video_record_by_uuid(session, video_uuid)
+
+        if not video_record:
+            main_logger.warning(f"Video record not found for status check.", extra=log_req_extra)
+            raise HTTPException(status_code=404, detail="Video not found.")
+
+        download_url_for_clip: Optional[str] = None
+        # Construct download URL if highlight is generated and path/key exists
+        if video_record.processing_status == database_service.VideoProcessingStatus.HIGHLIGHT_GENERATED and \
+           video_record.highlight_clip_path:
+            
+            # Option 1: If highlight_clip_path is a direct public URL from Supabase Storage (less likely if you just store the key)
+            # download_url_for_clip = video_record.highlight_clip_path
+
+            # Option 2: If highlight_clip_path is the Supabase Storage KEY (path within bucket)
+            # and you have a separate /clips/download/... endpoint or will generate a signed URL.
+            # For now, let's construct a relative path to a hypothetical download endpoint.
+            # This assumes your download endpoint will be like /api/v1/clips/download/{video_uuid}/{filename}
+            # and highlight_clip_path stores just the filename or the key path.
+            
+            # If highlight_clip_path stored is the full key like "video_uuid/highlight_filename.mp4"
+            # then the filename part is os.path.basename(video_record.highlight_clip_path)
+            # If it's just the filename, then it's video_record.highlight_clip_path
+            
+            # Assuming video_record.highlight_clip_path stores the full path/key in Supabase Storage
+            # like "e5e6c229-.../generated_highlights/highlight_e5e6c229-..._abc.mp4"
+            # And your download endpoint needs video_uuid and the actual filename part
+            
+            clip_filename_part = None
+            if video_record.highlight_clip_path:
+                # Extract filename if highlight_clip_path is a full path/key
+                # This depends on how you store highlight_clip_path.
+                # If it's just the filename: clip_filename_part = video_record.highlight_clip_path
+                # If it's a key like "video_uuid/generated_highlights/filename.mp4":
+                try:
+                    # Attempt to split by Supabase's typical structure if it's a full key
+                    # e.g., "e5e6c229-65c7-45db-9c71-526b93e1d98f/generated_highlights/highlight_clip.mp4"
+                    # We want "highlight_clip.mp4"
+                    path_parts = video_record.highlight_clip_path.split('/')
+                    if len(path_parts) > 0:
+                        clip_filename_part = path_parts[-1]
+                    else: # Should not happen if path is valid
+                        clip_filename_part = video_record.highlight_clip_path
+                except Exception:
+                    clip_filename_part = video_record.highlight_clip_path # Fallback
+
+            if clip_filename_part:
+                # This URL is relative to your API base. Frontend will prepend http://localhost:8001
+                # This assumes you will create a GET /clips/{video_uuid}/{filename_from_db_key} endpoint
+                download_url_for_clip = f"/clips/{video_uuid}/{clip_filename_part}" 
+                main_logger.info(f"Constructed download_url: {download_url_for_clip}", extra=log_req_extra)
+
+
+        return VideoStatusResponse(
+            video_uuid=video_record.video_uuid,
+            processing_status=video_record.processing_status.value, # Return string value of enum
+            error_message=video_record.error_message,
+            highlight_clip_path=video_record.highlight_clip_path, # Send the stored path/key
+            download_url=download_url_for_clip
+        )
+
+
+
+
+@app.get("/clips/download/{video_uuid}/{filename_key_part}", 
+         summary="Get a download URL or stream a generated highlight clip",
+         # response_class=RedirectResponse # If redirecting to signed URL
+        )
+async def download_or_get_clip_url(video_uuid: str, filename_key_part: str): # filename_key_part is just the file name
+    log_req_extra = {'video_id': video_uuid}
+    main_logger.info(f"Download request for clip part: '{filename_key_part}'", extra=log_req_extra)
+
+    async with database_service.get_db_session() as session:
+        video_record = await database_service.get_video_record_by_uuid(session, video_uuid)
+        if not video_record:
+            raise HTTPException(status_code=404, detail="Video record not found.")
+        
+        if video_record.processing_status != database_service.VideoProcessingStatus.HIGHLIGHT_GENERATED:
+             raise HTTPException(status_code=404, detail=f"Highlight clip not ready or generation failed. Status: {video_record.processing_status.value}")
+
+        if not video_record.highlight_clip_path:
+            raise HTTPException(status_code=404, detail="Highlight clip path not found in database.")
+
+        # Construct the full Supabase key from the stored part
+        # Assuming highlight_clip_path stores something like "video_uuid/generated_highlights/actual_filename.mp4"
+        # OR if it just stores "actual_filename.mp4" and you need to reconstruct the full key
+        # For this example, let's assume video_record.highlight_clip_path IS the full Supabase key
+        supabase_clip_key = video_record.highlight_clip_path
+        
+        # Ensure filename_key_part matches the end of the stored supabase_clip_key for safety
+        if not supabase_clip_key.endswith(filename_key_part):
+            main_logger.warning(f"Filename part mismatch. DB: '{supabase_clip_key}', Req: '{filename_key_part}'", extra=log_req_extra)
+            raise HTTPException(status_code=400, detail="Requested filename does not match stored clip.")
+
+    try:
+        # Generate a signed URL from Supabase Storage
+        signed_url = await storage_service.create_signed_url(
+            bucket_name=storage_service.HIGHLIGHT_BUCKET_NAME, # You'll need a bucket for highlights
+            object_path=supabase_clip_key,
+            expires_in=3600  # URL valid for 1 hour
+        )
+        if not signed_url:
+            main_logger.error(f"Failed to generate signed URL for Supabase key: {supabase_clip_key}", extra=log_req_extra)
+            raise HTTPException(status_code=500, detail="Could not generate download link.")
+        
+        main_logger.info(f"Generated signed URL for highlight clip: {supabase_clip_key}", extra=log_req_extra)
+        return RedirectResponse(url=signed_url) # Redirect browser to download from Supabase
+
+    except Exception as e:
+        main_logger.exception(f"Error generating signed URL or serving clip for {supabase_clip_key}", extra=log_req_extra)
+        raise HTTPException(status_code=500, detail="Error serving highlight clip.")
+
+
+@app.get("/videos", response_model=List[VideoListItemResponse], summary="List all videos and their status")
+async def list_videos_endpoint():
+    log_req_extra = {'video_id': 'LIST_VIDEOS_REQUEST'}
+    main_logger.info("Request received to list all videos.", extra=log_req_extra)
+    videos_data = []
+    try:
+        async with database_service.get_db_session() as session:
+            # Assuming your Video model is database_service.Video
+            stmt = select(database_service.Video).order_by(database_service.Video.created_at.desc())
+            result = await session.execute(stmt)
+            videos_from_db = result.scalars().all()
+            
+            for vid_db in videos_from_db:
+                videos_data.append(
+                    VideoListItemResponse(
+                        video_uuid=vid_db.video_uuid,
+                        original_filename_server=vid_db.original_filename_server,
+                        processing_status=vid_db.processing_status.value, # Get string value of enum
+                        created_at=vid_db.created_at,
+                        updated_at=vid_db.updated_at,
+                        highlight_clip_path=vid_db.highlight_clip_path
+                    )
+                )
+        main_logger.info(f"Returning {len(videos_data)} videos from database.", extra=log_req_extra)
+        return videos_data
+    except Exception as e:
+        main_logger.exception("Error fetching list of videos from database.", extra=log_req_extra)
+        raise HTTPException(status_code=500, detail="Failed to retrieve video list from server.")
+
 
 
 @app.post("/videos/{video_uuid}/summary_highlight_clip",
