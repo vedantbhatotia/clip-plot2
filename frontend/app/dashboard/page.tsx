@@ -194,7 +194,7 @@ export default function DashboardPage() {
               Refresh List
             </Button>
             <Button asChild size="sm">
-              <Link href="/">
+              <Link href="/upload">
                 <UploadIcon className="mr-2 h-4 w-4" /> Upload New Video
               </Link>
             </Button>
